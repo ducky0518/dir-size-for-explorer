@@ -102,7 +102,7 @@ static bool GetAutoScaleFoldersOnly() {
     return s_val.load();
 }
 
-static uint64_t LookupDirSize(const std::wstring& fullPath) {
+static std::optional<uint64_t> LookupDirSize(const std::wstring& fullPath) {
     std::wstring normalized = NormalizePath(fullPath.c_str());
     SizeMetric metric = GetCurrentSizeMetric();
 
@@ -121,7 +121,7 @@ static uint64_t LookupDirSize(const std::wstring& fullPath) {
         return (metric == SizeMetric::AllocationSize) ? entry->allocSize : entry->totalSize;
     }
 
-    return 0;
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +226,10 @@ static NTSTATUS NTAPI HookedNtQueryDirectoryFile(
                 std::wstring fullPath = dirPath + L"\\" +
                     std::wstring(fileName, nameChars);
 
-                uint64_t size = LookupDirSize(fullPath);
-                if (size > 0) {
-                    hdr->EndOfFile.QuadPart = static_cast<LONGLONG>(size);
-                    hdr->AllocationSize.QuadPart = static_cast<LONGLONG>(size);
+                auto size = LookupDirSize(fullPath);
+                if (size.has_value()) {
+                    hdr->EndOfFile.QuadPart = static_cast<LONGLONG>(*size);
+                    hdr->AllocationSize.QuadPart = static_cast<LONGLONG>(*size);
                 }
             }
         }
@@ -251,7 +251,7 @@ static PropStoreGetValueFn TruePropStoreGetValue = nullptr;
 
 // Track which size values we injected for directories (per-thread).
 // The format hook uses this to only auto-scale directory sizes, not files.
-static thread_local uint64_t t_lastInjectedDirSize = 0;
+static thread_local std::optional<uint64_t> t_lastInjectedDirSize;
 
 static HRESULT STDMETHODCALLTYPE HookedPropStoreGetValue(
     void* pThis, REFPROPERTYKEY key, PROPVARIANT* ppropvar)
@@ -280,12 +280,12 @@ static HRESULT STDMETHODCALLTYPE HookedPropStoreGetValue(
             DWORD attrs = GetFileAttributesW(path.c_str());
             if (attrs != INVALID_FILE_ATTRIBUTES &&
                 (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-                uint64_t size = LookupDirSize(path);
-                if (size > 0) {
+                auto size = LookupDirSize(path);
+                if (size.has_value()) {
                     PropVariantClear(ppropvar);
                     ppropvar->vt = VT_UI8;
-                    ppropvar->uhVal.QuadPart = size;
-                    t_lastInjectedDirSize = size;
+                    ppropvar->uhVal.QuadPart = *size;
+                    t_lastInjectedDirSize = *size;
                 }
             }
         }
@@ -319,9 +319,9 @@ static HRESULT STDMETHODCALLTYPE HookedPropDescFormatForDisplay(
 
         if (GetAutoScaleFoldersOnly()) {
             // Only format values we injected for directories
-            if (t_lastInjectedDirSize != 0 &&
-                propvar.uhVal.QuadPart == t_lastInjectedDirSize) {
-                t_lastInjectedDirSize = 0;
+            if (t_lastInjectedDirSize.has_value() &&
+                propvar.uhVal.QuadPart == *t_lastInjectedDirSize) {
+                t_lastInjectedDirSize.reset();
                 shouldFormat = true;
             }
         } else {
