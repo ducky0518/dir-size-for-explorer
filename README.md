@@ -4,6 +4,8 @@ A Windows shell extension that displays **directory sizes** directly in Explorer
 
 ![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Architecture: x64](https://img.shields.io/badge/arch-x64-blue)
 
+![Directory sizes shown in Explorer's Size column](docs/explorer-size-column.png)
+
 ## How It Works
 
 Windows Explorer normally leaves the Size column blank for folders. DirSize hooks into Explorer's rendering pipeline using [Microsoft Detours](https://github.com/microsoft/Detours) to fill in calculated directory sizes — transparently, with no UI changes to Explorer itself.
@@ -45,6 +47,8 @@ All settings are accessible from the **DirSize Settings** tray app. Two tabs:
 
 ### Scanner Tab
 
+![Scanner settings tab](docs/settings-scanner-tab.png)
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Scan Interval | 30 min | How often to run a full scan (1–1440 minutes) |
@@ -53,6 +57,8 @@ All settings are accessible from the **DirSize Settings** tray app. Two tabs:
 | Use Change Journal | On | Enable NTFS USN journal for incremental updates |
 
 ### Display Tab
+
+![Display settings tab](docs/settings-display-tab.png)
 
 | Setting | Default | Description |
 |---------|---------|-------------|
