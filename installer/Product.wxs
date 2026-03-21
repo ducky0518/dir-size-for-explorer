@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="DirSize for Explorer"
+           Manufacturer="DirSize Project"
+           Version="1.0.0.0"
+           UpgradeCode="E8F1A2B3-C4D5-6E7F-8A9B-0C1D2E3F4A5B"
+           InstallerVersion="500">
+
+    <!-- Application icon (shown in Add/Remove Programs and wizard title bar) -->
+    <Icon Id="DirSizeIcon" SourceFile="tray\dirsize.ico" />
+    <Property Id="ARPPRODUCTICON" Value="DirSizeIcon" />
+
+    <MajorUpgrade DowngradeErrorMessage=
+        "A newer version of DirSize for Explorer is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Installation directory -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DirSizeForExplorer" />
+    </StandardDirectory>
+
+    <!-- ProgramData directory for the database -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="DirSizeForExplorer" />
+    </StandardDirectory>
+
+    <!-- Start Menu shortcut -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="DirSizeMenuFolder" Name="DirSize for Explorer" />
+    </StandardDirectory>
+
+    <!-- Features -->
+    <Feature Id="Core" Title="DirSize Core" Level="1"
+             Description="Shell extension and background service (required)"
+             AllowAbsent="no">
+      <ComponentGroupRef Id="CoreComponents" />
+      <ComponentGroupRef Id="ServiceComponents" />
+      <ComponentGroupRef Id="RegistryComponents" />
+    </Feature>
+
+    <Feature Id="TrayApp" Title="System Tray Settings" Level="1"
+             Description="System tray application for configuring DirSize settings">
+      <ComponentGroupRef Id="TrayComponents" />
+      <ComponentGroupRef Id="StartMenuComponents" />
+    </Feature>
+
+    <!-- Minimal install wizard UI -->
+    <ui:WixUI Id="WixUI_Minimal" />
+
+    <!-- License agreement text (required by WixUI_Minimal) -->
+    <WixVariable Id="WixUILicenseRtf" Value="installer\License.rtf" />
+
+    <!-- Custom wizard bitmaps -->
+    <WixVariable Id="WixUIDialogBmp" Value="installer\DialogBmp.bmp" />
+    <WixVariable Id="WixUIBannerBmp" Value="installer\BannerBmp.bmp" />
+
+    <!-- Exit dialog: informational text + launch checkbox -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="DirSize for Explorer has been installed successfully. Directory sizes will appear in the Size column once the background scan completes." />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+              Value="Launch DirSize Settings" />
+
+    <!-- Launch tray app via ShellExecute when user clicks Finish with checkbox checked -->
+    <Property Id="WixShellExecTarget" Value="[#DirSizeTray.exe]" />
+    <CustomAction Id="LaunchApplication"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes"
+                  BinaryRef="Wix4UtilCA_X64"
+                  Return="ignore" />
+
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction"
+               Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <!-- Custom action to register the property schema after install -->
+    <CustomAction Id="RegisterPropertySchema"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSRegisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Custom action to unregister the property schema on uninstall -->
+    <CustomAction Id="UnregisterPropertySchema"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSUnregisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Kill Explorer and start it again so the shell extension loads -->
+    <CustomAction Id="RestartExplorer"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c &quot;taskkill /f /im explorer.exe &amp; ping -n 3 127.0.0.1 &gt;nul &amp; start explorer.exe&quot;"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterPropertySchema" After="InstallFiles"
+              Condition="NOT Installed" />
+      <Custom Action="UnregisterPropertySchema" Before="RemoveFiles"
+              Condition="Installed AND REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RestartExplorer" Before="InstallFinalize"
+              Condition="NOT Installed" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

@@ -1,0 +1,61 @@
+#include "resource.h"
+#include <windows.h>
+#include <commctrl.h>
+
+// Use the default application icon (a real icon .ico file would be added later)
+IDI_TRAYICON ICON "dirsize.ico"
+
+// Settings Dialog
+IDD_SETTINGS DIALOGEX 0, 0, 340, 280
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "DirSize for Explorer - Settings"
+FONT 9, "Segoe UI"
+BEGIN
+    CONTROL         "", IDC_TAB_CONTROL, WC_TABCONTROLW, 0,
+                    7, 7, 326, 240
+
+    // These controls are positioned within the tab area and shown/hidden
+    // based on the active tab. Coordinates are relative to the dialog.
+
+    // --- Scanner Tab Controls ---
+    LTEXT           "Scan interval (minutes):", IDC_LBL_SCAN_INTERVAL, 20, 35, 90, 10
+    EDITTEXT        IDC_SCAN_INTERVAL, 115, 33, 40, 14, ES_NUMBER
+    CONTROL         "", IDC_SPIN_INTERVAL, UPDOWN_CLASSW, UDS_SETBUDDYINT | UDS_AUTOBUDDY | UDS_ARROWKEYS,
+                    155, 33, 11, 14
+
+    LTEXT           "IO Priority:", IDC_LBL_IO_PRIORITY, 200, 35, 45, 10
+    COMBOBOX        IDC_IO_PRIORITY, 250, 33, 70, 60, CBS_DROPDOWNLIST | WS_VSCROLL
+
+    LTEXT           "Watched directories:", IDC_LBL_WATCHED_DIRS, 20, 55, 90, 10
+    LISTBOX         IDC_WATCHED_LIST, 20, 67, 250, 80,
+                    LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER
+    PUSHBUTTON      "Add...", IDC_BTN_ADD_DIR, 280, 67, 45, 14
+    PUSHBUTTON      "Remove", IDC_BTN_REMOVE_DIR, 280, 85, 45, 14
+
+    AUTOCHECKBOX    "Use NTFS Change Journal for incremental updates",
+                    IDC_CHK_CHANGE_JOURNAL, 20, 155, 250, 10
+
+    // --- Display Tab Controls (initially hidden) ---
+    // Size Metric group
+    GROUPBOX        "Size Metric", IDC_GROUP_METRIC, 15, 30, 310, 42
+    AUTORADIOBUTTON "Size (logical file size)", IDC_RADIO_LOGICAL,
+                    25, 42, 200, 10, WS_GROUP
+    AUTORADIOBUTTON "Size on disk (allocation size)", IDC_RADIO_ALLOC,
+                    25, 55, 200, 10
+
+    // Column Formatting group
+    GROUPBOX        "Column Formatting", IDC_GROUP_FORMAT, 15, 78, 310, 58
+    AUTORADIOBUTTON "Show sizes in KB (Windows default)", IDC_RADIO_FMT_DEFAULT,
+                    25, 90, 250, 10, WS_GROUP
+    AUTORADIOBUTTON "Auto-scale size labels (KB/MB/GB)", IDC_RADIO_FMT_AUTO,
+                    25, 103, 250, 10
+    AUTORADIOBUTTON "Folders only", IDC_RADIO_SCALE_FOLDERS,
+                    40, 116, 80, 10, WS_GROUP
+    AUTORADIOBUTTON "Files and folders", IDC_RADIO_SCALE_ALL,
+                    125, 116, 90, 10
+
+    // --- Bottom buttons ---
+    DEFPUSHBUTTON   "OK", IDC_BTN_OK, 170, 255, 50, 14
+    PUSHBUTTON      "Cancel", IDC_BTN_CANCEL, 225, 255, 50, 14
+    PUSHBUTTON      "Apply", IDC_BTN_APPLY, 280, 255, 50, 14
+END

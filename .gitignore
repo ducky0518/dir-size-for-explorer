@@ -1,0 +1,43 @@
+# Build output
+build/
+out/
+x64/
+
+# vcpkg installed packages (restored from vcpkg.json)
+vcpkg_installed/
+
+# IDE / editor
+.vs/
+.vscode/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+*.cachefile
+*.VC.db
+*.VC.opendb
+CMakeSettings.json
+CMakeUserPresets.json
+
+# Compiled binaries
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.msi
+*.wixpdb
+*.wixobj
+*.cab
+*.msm
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Installer staging
+install-stage/

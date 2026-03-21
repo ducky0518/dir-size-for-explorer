@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<schema xmlns="http://schemas.microsoft.com/windows/2006/propertydescription"
+        schemaVersion="1.0">
+  <propertyDescriptionList publisher="DirSize" product="DirSizeForExplorer">
+    <propertyDescription
+        formatID="{B7E8A3D1-5C4F-4A92-8E1D-6F3B2A9C0D4E}"
+        propID="2"
+        name="DirSize.TotalSize">
+      <typeInfo type="UInt64"
+                groupingRange="Size"
+                isInnate="true"
+                isViewable="true" />
+      <labelInfo label="Folder Size"
+                 invitationText="Calculated directory size"
+                 sortDescription="LowestToHighest" />
+      <displayInfo displayType="Number"
+                   defaultColumnWidth="15"
+                   alignment="Right"
+                   defaultSortDirection="Descending">
+        <numberFormat formatAs="ByteSize" />
+      </displayInfo>
+    </propertyDescription>
+  </propertyDescriptionList>
+</schema>

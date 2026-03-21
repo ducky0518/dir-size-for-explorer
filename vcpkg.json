@@ -1,0 +1,9 @@
+{
+  "name": "dir-size-for-explorer",
+  "version": "1.0.0",
+  "description": "Windows Explorer shell extension that adds a Total Size column for directories",
+  "dependencies": [
+    "sqlite3",
+    "detours"
+  ]
+}

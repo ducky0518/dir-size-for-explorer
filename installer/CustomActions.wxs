@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <!-- Custom action to register the property schema after install -->
+    <CustomAction Id="RegisterPropertySchema"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSRegisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Custom action to unregister the property schema on uninstall -->
+    <CustomAction Id="UnregisterPropertySchema"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSUnregisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Kill Explorer; Windows auto-restarts it via AutoRestartShell -->
+    <CustomAction Id="RestartExplorer"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="taskkill.exe /f /im explorer.exe"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterPropertySchema" After="InstallFiles"
+              Condition="NOT Installed" />
+      <Custom Action="UnregisterPropertySchema" Before="RemoveFiles"
+              Condition="Installed AND REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RestartExplorer" Before="InstallFinalize"
+              Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Fragment>
+
+</Wix>

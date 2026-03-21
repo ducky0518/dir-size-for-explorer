@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+    <!-- Core shell extension files -->
+    <ComponentGroup Id="CoreComponents" Directory="INSTALLFOLDER">
+      <Component Id="ShellExtDll" Guid="F1A2B3C4-D5E6-7F8A-9B0C-1D2E3F4A5B6C">
+        <File Id="DirSizeShellExt.dll" Source="$(var.BuildDir)\DirSizeShellExt.dll"
+              KeyPath="yes" />
+
+        <!-- COM registration: Property Handler -->
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{A1C3E5F7-2B4D-6E8F-9A0B-C1D2E3F4A5B6}">
+          <RegistryValue Type="string" Value="DirSize Property Handler" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{A1C3E5F7-2B4D-6E8F-9A0B-C1D2E3F4A5B6}\InprocServer32">
+          <RegistryValue Type="string" Value="[INSTALLFOLDER]DirSizeShellExt.dll" />
+          <RegistryValue Name="ThreadingModel" Type="string" Value="Both" />
+        </RegistryKey>
+
+        <!-- COM registration: Context Menu -->
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{D2E4F6A8-3C5E-7F90-AB12-D3E4F5A6B7C8}">
+          <RegistryValue Type="string" Value="DirSize Context Menu" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{D2E4F6A8-3C5E-7F90-AB12-D3E4F5A6B7C8}\InprocServer32">
+          <RegistryValue Type="string" Value="[INSTALLFOLDER]DirSizeShellExt.dll" />
+          <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+        </RegistryKey>
+
+        <!-- Register property handler for Directory shell object -->
+        <RegistryKey Root="HKCR" Key="Directory\ShellEx\PropertyHandler">
+          <RegistryValue Type="string"
+              Value="{A1C3E5F7-2B4D-6E8F-9A0B-C1D2E3F4A5B6}" />
+        </RegistryKey>
+
+        <!-- Register context menu for Directory -->
+        <RegistryKey Root="HKCR"
+            Key="Directory\ShellEx\ContextMenuHandlers\DirSize">
+          <RegistryValue Type="string"
+              Value="{D2E4F6A8-3C5E-7F90-AB12-D3E4F5A6B7C8}" />
+        </RegistryKey>
+
+        <!-- Register context menu for Folder -->
+        <RegistryKey Root="HKCR"
+            Key="Folder\ShellEx\ContextMenuHandlers\DirSize">
+          <RegistryValue Type="string"
+              Value="{D2E4F6A8-3C5E-7F90-AB12-D3E4F5A6B7C8}" />
+        </RegistryKey>
+
+        <!-- COM registration: Icon Overlay (forces DLL load at Explorer startup) -->
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{F3A5C7E9-4D6F-8A1B-BC23-E4F5A6B7C8D9}">
+          <RegistryValue Type="string" Value="DirSize Overlay" />
+        </RegistryKey>
+        <RegistryKey Root="HKCR"
+            Key="CLSID\{F3A5C7E9-4D6F-8A1B-BC23-E4F5A6B7C8D9}\InprocServer32">
+          <RegistryValue Type="string" Value="[INSTALLFOLDER]DirSizeShellExt.dll" />
+          <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
+        </RegistryKey>
+
+        <!-- Register icon overlay handler (space prefix for priority sorting) -->
+        <RegistryKey Root="HKLM"
+            Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers\   DirSize">
+          <RegistryValue Type="string"
+              Value="{F3A5C7E9-4D6F-8A1B-BC23-E4F5A6B7C8D9}" />
+        </RegistryKey>
+
+        <!-- Approve the shell extensions -->
+        <RegistryKey Root="HKLM"
+            Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved">
+          <RegistryValue Name="{A1C3E5F7-2B4D-6E8F-9A0B-C1D2E3F4A5B6}"
+              Type="string" Value="DirSize Property Handler" />
+          <RegistryValue Name="{D2E4F6A8-3C5E-7F90-AB12-D3E4F5A6B7C8}"
+              Type="string" Value="DirSize Context Menu" />
+          <RegistryValue Name="{F3A5C7E9-4D6F-8A1B-BC23-E4F5A6B7C8D9}"
+              Type="string" Value="DirSize Overlay" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Property description schema file -->
+      <Component Id="PropDesc" Guid="A2B3C4D5-E6F7-8A9B-0C1D-2E3F4A5B6C7D">
+        <File Id="DirSizeTotalSize.propdesc"
+              Source="$(var.BuildDir)\DirSizeTotalSize.propdesc"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- SQLite3 runtime -->
+      <Component Id="Sqlite3Dll" Guid="1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D">
+        <File Id="sqlite3.dll" Source="$(var.BuildDir)\sqlite3.dll"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <!-- Service executable -->
+    <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
+      <Component Id="ServiceExe" Guid="B3C4D5E6-F7A8-9B0C-1D2E-3F4A5B6C7D8E">
+        <File Id="DirSizeSvc.exe" Source="$(var.BuildDir)\DirSizeSvc.exe"
+              KeyPath="yes" />
+        <ServiceInstall Id="DirSizeSvcInstall"
+                        Name="DirSizeSvc"
+                        DisplayName="Directory Size Scanner"
+                        Description="Calculates and caches directory sizes for the Explorer Total Size column."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem" />
+        <ServiceControl Id="DirSizeSvcControl"
+                        Name="DirSizeSvc"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+        <!-- Recovery actions: restart after 60s, 120s, then 300s -->
+        <util:ServiceConfig ServiceName="DirSizeSvc"
+            FirstFailureActionType="restart"
+            SecondFailureActionType="restart"
+            ThirdFailureActionType="restart"
+            RestartServiceDelayInSeconds="60"
+            ResetPeriodInDays="1" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <!-- Default configuration in the registry -->
+    <ComponentGroup Id="RegistryComponents" Directory="INSTALLFOLDER">
+      <Component Id="DefaultConfig" Guid="C4D5E6F7-A8B9-0C1D-2E3F-4A5B6C7D8E9F">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\DirSizeForExplorer"
+                     ForceCreateOnInstall="yes">
+          <RegistryValue Name="ScanIntervalMinutes" Type="integer" Value="30" />
+          <RegistryValue Name="DisplayFormat" Type="integer" Value="0" />
+          <RegistryValue Name="AutoScaleFoldersOnly" Type="integer" Value="1" />
+          <RegistryValue Name="SizeMetric" Type="integer" Value="0" />
+          <RegistryValue Name="IOPriority" Type="integer" Value="1" />
+          <RegistryValue Name="UseChangeJournal" Type="integer" Value="1" />
+          <!-- Allow non-admin users to modify settings via the tray app -->
+          <util:PermissionEx User="Users" GenericRead="yes" GenericWrite="yes" />
+        </RegistryKey>
+      </Component>
+
+      <!-- Data directory -->
+      <Component Id="DataDir" Guid="D5E6F7A8-B9C0-1D2E-3F4A-5B6C7D8E9FA0"
+                 Directory="DATAFOLDER">
+        <CreateFolder />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <!-- Tray application -->
+    <ComponentGroup Id="TrayComponents" Directory="INSTALLFOLDER">
+      <Component Id="TrayExe" Guid="E6F7A8B9-C0D1-2E3F-4A5B-6C7D8E9FA0B1">
+        <File Id="DirSizeTray.exe" Source="$(var.BuildDir)\DirSizeTray.exe"
+              KeyPath="yes" />
+        <!-- Auto-start with user logon -->
+        <RegistryValue Root="HKMU"
+            Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            Name="DirSizeTray" Type="string"
+            Value="[INSTALLFOLDER]DirSizeTray.exe" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <!-- Start Menu shortcut -->
+    <ComponentGroup Id="StartMenuComponents" Directory="DirSizeMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="F7A8B9C0-D1E2-3F4A-5B6C-7D8E9FA0B1C2">
+        <Shortcut Id="TrayAppShortcut"
+                  Name="DirSize Settings"
+                  Target="[INSTALLFOLDER]DirSizeTray.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Description="Configure DirSize for Explorer settings" />
+        <RemoveFolder Id="RemoveDirSizeMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="SOFTWARE\DirSizeForExplorer"
+                       Name="StartMenuInstalled" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>
