@@ -376,9 +376,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         // Initialize About tab controls
         SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE, L"DirSize for Explorer  v1.0");
         SetDlgItemTextW(hDlg, IDC_ABOUT_DESC,
-            L"Adds a directory size column to Windows Explorer. "
-            L"A background service scans the filesystem and stores sizes in a local database. "
-            L"A COM shell extension injects the cached sizes into Explorer\x2019s built-in Size column.\r\n\r\n"
+            L"DirSize for Explorer brings folder sizes to Windows Explorer \x2014 "
+            L"filling in the Size column for directories, just like it already does for individual files. "
+            L"Sizes are kept current automatically in the background, so you always have an accurate "
+            L"picture of what\x2019s taking up space on your drives.\r\n\r\n"
             L"Source code and documentation:");
         SetDlgItemTextW(hDlg, IDC_ABOUT_LINK,
             L"<a href=\"https://github.com/ducky0518/dir-size-for-explorer\">"
