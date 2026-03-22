@@ -7,8 +7,7 @@
            Manufacturer="DirSize Project"
            Version="1.1.0.0"
            UpgradeCode="E8F1A2B3-C4D5-6E7F-8A9B-0C1D2E3F4A5B"
-           InstallerVersion="500"
-           Platform="x64">
+           InstallerVersion="500">
 
     <!-- Application icon (shown in Add/Remove Programs and wizard title bar) -->
     <Icon Id="DirSizeIcon" SourceFile="tray\dirsize.ico" />
