@@ -7,6 +7,10 @@
 #include <objbase.h>
 #include <CommCtrl.h>
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' " \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' " \
@@ -22,13 +26,175 @@ HWND g_hWnd = nullptr;
 HWND g_hSettingsDlg = nullptr;
 NOTIFYICONDATAW g_nid = {};
 
+// --- Scanning animation state ---
+HICON    g_hIconNormal = nullptr;
+HICON    g_hAnimFrames[4] = {};
+int      g_animFrame = 0;
+bool     g_isScanning = false;
+int      g_pollFailures = 0;       // consecutive failed polls
+
+// ---------------------------------------------------------------------------
+// Build four animation-frame icons with a green "scan line" that sweeps
+// top-to-bottom through the icon.  Each frame places the bright bar at a
+// different vertical position, giving a clear scanning effect.
+// ---------------------------------------------------------------------------
+void CreateAnimationFrames() {
+    g_hIconNormal = (HICON)LoadImageW(
+        g_hInstance, MAKEINTRESOURCEW(IDI_TRAYICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    if (!g_hIconNormal) return;
+
+    ICONINFO baseInfo;
+    if (!GetIconInfo(g_hIconNormal, &baseInfo)) return;
+
+    BITMAP bm;
+    GetObject(baseInfo.hbmColor, sizeof(bm), &bm);
+    int cx = bm.bmWidth;
+    int cy = bm.bmHeight;
+
+    // Extract 32-bit BGRA pixel data (bottom-up row order)
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = cx;
+    bmi.bmiHeader.biHeight      = cy;   // positive = bottom-up
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<uint32_t> basePixels(cx * cy);
+    HDC hdcScreen = GetDC(nullptr);
+    GetDIBits(hdcScreen, baseInfo.hbmColor, 0, cy,
+              basePixels.data(), &bmi, DIB_RGB_COLORS);
+
+    // A green scan-line sweeps top → bottom in 4 steps.
+    // The bar is a few pixels thick with fading edges so it reads well
+    // even on a tiny 16×16 icon.
+    int barHalf = (std::max)(1, cy / 12);        // 1 px radius on 16×16
+
+    for (int frame = 0; frame < 4; frame++) {
+        auto pixels = basePixels;                // work on a copy
+
+        // Evenly space 4 line centres across the icon height
+        int yCenter = (cy * (2 * frame + 1)) / 8;
+
+        for (int dy = -barHalf; dy <= barHalf; dy++) {
+            int vy = yCenter + dy;
+            if (vy < 0 || vy >= cy) continue;
+
+            // Strength falls off from centre of the bar
+            float strength = 1.0f - static_cast<float>(abs(dy)) / (barHalf + 1.0f);
+
+            for (int x = 0; x < cx; x++) {
+                int idx = (cy - 1 - vy) * cx + x;       // bottom-up flip
+                uint32_t px = pixels[idx];
+                uint8_t a = (px >> 24) & 0xFF;
+                if (a < 32) continue;                    // skip transparent
+
+                uint8_t b =  px        & 0xFF;
+                uint8_t g = (px >>  8) & 0xFF;
+                uint8_t r = (px >> 16) & 0xFF;
+
+                // Boost green channel, slightly dim red & blue (premultiplied)
+                int greenBoost = static_cast<int>(120.0f * strength);
+                g = static_cast<uint8_t>(
+                        (std::min)(static_cast<int>(a),
+                                   static_cast<int>(g) + greenBoost));
+                r = static_cast<uint8_t>(r * (1.0f - 0.25f * strength));
+                b = static_cast<uint8_t>(b * (1.0f - 0.25f * strength));
+
+                pixels[idx] = (static_cast<uint32_t>(a) << 24) |
+                               (static_cast<uint32_t>(r) << 16) |
+                               (static_cast<uint32_t>(g) <<  8) |
+                                static_cast<uint32_t>(b);
+            }
+        }
+
+        void* dibBits = nullptr;
+        HBITMAP hDib = CreateDIBSection(
+            hdcScreen, &bmi, DIB_RGB_COLORS, &dibBits, nullptr, 0);
+        if (hDib && dibBits) {
+            memcpy(dibBits, pixels.data(), pixels.size() * sizeof(uint32_t));
+            ICONINFO ni  = {};
+            ni.fIcon     = TRUE;
+            ni.hbmColor  = hDib;
+            ni.hbmMask   = baseInfo.hbmMask;
+            g_hAnimFrames[frame] = CreateIconIndirect(&ni);
+        }
+        if (hDib) DeleteObject(hDib);
+    }
+
+    ReleaseDC(nullptr, hdcScreen);
+    DeleteObject(baseInfo.hbmColor);
+    DeleteObject(baseInfo.hbmMask);
+}
+
+void DestroyAnimationFrames() {
+    for (auto& h : g_hAnimFrames) {
+        if (h) { DestroyIcon(h); h = nullptr; }
+    }
+    if (g_hIconNormal) { DestroyIcon(g_hIconNormal); g_hIconNormal = nullptr; }
+}
+
+void UpdateTrayIcon(HICON hIcon, const wchar_t* tip = nullptr) {
+    g_nid.hIcon = hIcon;
+    if (tip) wcscpy_s(g_nid.szTip, tip);
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+// ---------------------------------------------------------------------------
+// Start or stop the tray icon animation based on scanning state.
+// Called from both PollScanStatus() and the WM_SCAN_STATE message
+// (forwarded by the Logging tab) so both paths share the same logic.
+// ---------------------------------------------------------------------------
+void SetScanningState(bool scanning) {
+    bool wasScanning = g_isScanning;
+    g_isScanning = scanning;
+
+    if (g_isScanning && !wasScanning) {
+        g_animFrame = 0;
+        SetTimer(g_hWnd, IDT_SCAN_ANIM, 500, nullptr);
+        UpdateTrayIcon(g_hAnimFrames[0], L"DirSize \u2014 Scanning\u2026");
+    } else if (!g_isScanning && wasScanning) {
+        KillTimer(g_hWnd, IDT_SCAN_ANIM);
+        UpdateTrayIcon(g_hIconNormal, L"DirSize for Explorer");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fallback polling via lightweight GetStatus IPC — runs every 3 s.
+// When the Logging tab is open it sends WM_SCAN_STATE directly, so
+// this timer mainly covers the case where the settings dialog is closed.
+// ---------------------------------------------------------------------------
+void PollScanStatus() {
+    dirsize::IpcStatus status;
+    bool ok = dirsize::SendCommand(
+        dirsize::IpcCommand::GetStatus, status, 2000);
+
+    if (ok) {
+        g_pollFailures = 0;
+        SetScanningState(status == dirsize::IpcStatus::Busy);
+    } else {
+        g_pollFailures++;
+        if (g_pollFailures >= 3)
+            SetScanningState(false);   // service unreachable — assume idle
+    }
+}
+
+void AdvanceAnimFrame() {
+    g_animFrame = (g_animFrame + 1) % 4;
+    if (g_hAnimFrames[g_animFrame])
+        UpdateTrayIcon(g_hAnimFrames[g_animFrame]);
+}
+
+// --- Tray icon management ---
+
 void AddTrayIcon(HWND hWnd) {
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = hWnd;
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = LoadIconW(g_hInstance, MAKEINTRESOURCEW(IDI_TRAYICON));
+    g_nid.hIcon = g_hIconNormal;
     wcscpy_s(g_nid.szTip, L"DirSize for Explorer");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -65,6 +231,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
 
+    // Sent by the Logging tab every 2 s with the authoritative scanning state.
+    case WM_SCAN_STATE:
+        g_pollFailures = 0;
+        SetScanningState(wParam != 0);
+        return 0;
+
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDM_SETTINGS:
@@ -78,7 +250,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         case IDM_SCAN_NOW: {
             dirsize::IpcStatus status;
-            dirsize::SendCommand(dirsize::IpcCommand::ReloadConfig, status);
+            dirsize::SendCommand(dirsize::IpcCommand::ScanNow, status);
+            // Poll immediately so animation starts without waiting for timer
+            PollScanStatus();
             return 0;
         }
 
@@ -97,8 +271,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
 
+    case WM_TIMER:
+        if (wParam == IDT_TRAY_TIMER)
+            PollScanStatus();
+        else if (wParam == IDT_SCAN_ANIM)
+            AdvanceAnimFrame();
+        return 0;
+
     case WM_DESTROY:
+        KillTimer(hWnd, IDT_TRAY_TIMER);
+        KillTimer(hWnd, IDT_SCAN_ANIM);
         RemoveTrayIcon();
+        DestroyAnimationFrames();
         PostQuitMessage(0);
         return 0;
     }
@@ -138,7 +322,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
         return 1;
     }
 
+    CreateAnimationFrames();
     AddTrayIcon(g_hWnd);
+
+    // Poll service scanning status every 3 seconds
+    SetTimer(g_hWnd, IDT_TRAY_TIMER, 3000, nullptr);
 
     // Message loop
     MSG msg;

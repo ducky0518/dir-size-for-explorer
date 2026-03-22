@@ -15,6 +15,7 @@ enum class IpcCommand : uint32_t {
     GetStatus = 2,      // Query service/scanner status
     ReloadConfig = 3,   // Tell service to re-read config from registry
     GetLog = 4,         // Retrieve recent log entries + service status
+    ScanNow = 5,        // Request an immediate full scan
 };
 
 // Status codes returned by the service

@@ -43,6 +43,9 @@ public:
     // Reload configuration (e.g., after tray app changes settings).
     void ReloadConfig();
 
+    // Request an immediate full scan (used by "Scan Now" tray menu item).
+    void RequestFullScan();
+
     bool IsScanning() const { return m_scanning.load(); }
 
     // Accessors for status reporting (used by IPC GetLog command)
@@ -69,6 +72,7 @@ private:
 
     std::thread m_schedulerThread;
     std::atomic<bool> m_scanning{false};
+    std::atomic<bool> m_fullScanRequested{false};
 
     std::mutex m_queueMutex;
     std::queue<std::wstring> m_rescanQueue;

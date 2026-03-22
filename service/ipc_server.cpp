@@ -154,6 +154,12 @@ void IpcServer::HandleClient(HANDLE hPipe) {
         }
         break;
 
+    case IpcCommand::ScanNow:
+        if (m_scanner) {
+            m_scanner->RequestFullScan();
+        }
+        break;
+
     case IpcCommand::GetLog: {
         // Read sinceSeqNum from raw payload
         uint32_t sinceSeqNum = 0;
