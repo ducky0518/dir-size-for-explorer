@@ -32,6 +32,7 @@ HICON    g_hAnimFrames[4] = {};
 int      g_animFrame = 0;
 bool     g_isScanning = false;
 int      g_pollFailures = 0;       // consecutive failed polls
+UINT     g_wmTaskbarCreated = 0;   // registered "TaskbarCreated" message
 
 // ---------------------------------------------------------------------------
 // Build four animation-frame icons with a green "scan line" that sweeps
@@ -278,6 +279,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    // Explorer broadcasts "TaskbarCreated" when it restarts — re-add our icon
+    if (g_wmTaskbarCreated && message == g_wmTaskbarCreated) {
+        AddTrayIcon(hWnd);
+        if (g_isScanning && g_hAnimFrames[g_animFrame])
+            UpdateTrayIcon(g_hAnimFrames[g_animFrame], L"DirSize \u2014 Scanning\u2026");
+        return 0;
+    }
+
     return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
@@ -304,14 +313,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     wc.lpszClassName = L"DirSizeTrayClass";
     RegisterClassExW(&wc);
 
+    // Use a regular hidden window (not HWND_MESSAGE) so we receive
+    // broadcast messages like TaskbarCreated when Explorer restarts.
     g_hWnd = CreateWindowExW(0, L"DirSizeTrayClass", L"DirSize Tray",
-                             0, 0, 0, 0, 0, HWND_MESSAGE,
+                             0, 0, 0, 0, 0, nullptr,
                              nullptr, hInstance, nullptr);
 
     if (!g_hWnd) {
         CoUninitialize();
         return 1;
     }
+
+    // Register for Explorer restart notifications
+    g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     CreateAnimationFrames();
     AddTrayIcon(g_hWnd);
