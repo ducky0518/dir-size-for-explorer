@@ -45,6 +45,10 @@ public:
 
     bool IsScanning() const { return m_scanning.load(); }
 
+    // Accessors for status reporting (used by IPC GetLog command)
+    std::wstring GetCurrentPath() const;
+    int64_t GetLastFullScanTime() const;
+
 private:
     // The scheduler thread: wakes at configured intervals or when a rescan is queued.
     void SchedulerThread();
@@ -74,6 +78,11 @@ private:
     // Cluster size cache (per drive letter) for allocation size computation
     std::unordered_map<wchar_t, DWORD> m_clusterSizeCache;
     DWORD GetClusterSize(wchar_t driveLetter);
+
+    // Status tracking for the Logging tab
+    mutable std::mutex m_stateMutex;
+    std::wstring m_currentScanPath;
+    int64_t m_lastFullScanTime = 0;     // Unix epoch milliseconds
 };
 
 } // namespace dirsize
