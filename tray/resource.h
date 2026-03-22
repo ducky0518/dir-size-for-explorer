@@ -44,10 +44,14 @@
 #define IDC_LBL_LOG_VERBOSITY   244
 #define IDC_LOG_VERBOSITY       245
 
+// About tab controls
+#define IDC_ABOUT_TITLE         250
+#define IDC_ABOUT_DESC          251
+#define IDC_ABOUT_LINK          252
+
 // Tray menu commands
 #define IDM_SETTINGS            301
 #define IDM_SCAN_NOW            302
-#define IDM_ABOUT               303
 #define IDM_EXIT                304
 
 // Timer for tray

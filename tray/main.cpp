@@ -208,7 +208,6 @@ void ShowTrayMenu(HWND hWnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"Settings...");
     AppendMenuW(hMenu, MF_STRING, IDM_SCAN_NOW, L"Scan Now");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
 
     POINT pt;
@@ -255,14 +254,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             PollScanStatus();
             return 0;
         }
-
-        case IDM_ABOUT:
-            MessageBoxW(hWnd,
-                L"DirSize for Explorer v1.0\n\n"
-                L"Adds a Total Size column to Windows Explorer\n"
-                L"for viewing directory sizes.",
-                L"About DirSize", MB_OK | MB_ICONINFORMATION);
-            return 0;
 
         case IDM_EXIT:
             RemoveTrayIcon();
