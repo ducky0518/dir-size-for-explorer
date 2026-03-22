@@ -5,7 +5,7 @@
 
   <Package Name="DirSize for Explorer"
            Manufacturer="DirSize Project"
-           Version="1.0.0.0"
+           Version="1.1.0.0"
            UpgradeCode="E8F1A2B3-C4D5-6E7F-8A9B-0C1D2E3F4A5B"
            InstallerVersion="500">
 

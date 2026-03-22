@@ -374,7 +374,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         LoadSettingsToDialog(hDlg);
 
         // Initialize About tab controls
-        SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE, L"DirSize for Explorer  v1.0");
+        SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE, L"DirSize for Explorer  v1.1");
         SetDlgItemTextW(hDlg, IDC_ABOUT_DESC,
             L"DirSize for Explorer brings folder sizes to Windows Explorer \x2014 "
             L"filling in the Size column for directories, just like it already does for individual files. "
