@@ -38,7 +38,8 @@ public:
     void Stop();
 
     // Queue a specific path for immediate rescan (used by IPC "Recalculate" and USN monitor).
-    void QueueRescan(const std::wstring& path);
+    // Returns true if the path was queued, false if filtered out (not under a watched dir).
+    bool QueueRescan(const std::wstring& path);
 
     // Reload configuration (e.g., after tray app changes settings).
     void ReloadConfig();

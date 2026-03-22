@@ -158,15 +158,17 @@ void ChangeJournalMonitor::MonitorThread() {
         m_lastUsn = nextUsn;
 
         // Resolve parent references to paths and queue rescans
-        if (!affectedParents.empty()) {
-            Log(LogSeverity::Verbose, "USN: %d changed paths on %c:",
-                static_cast<int>(affectedParents.size()), m_driveLetter);
-        }
+        int queued = 0;
         for (DWORDLONG parentRef : affectedParents) {
             std::wstring parentPath = ResolveFileReference(parentRef);
             if (!parentPath.empty()) {
-                m_scanner.QueueRescan(parentPath);
+                if (m_scanner.QueueRescan(parentPath))
+                    queued++;
             }
+        }
+        if (!affectedParents.empty()) {
+            Log(LogSeverity::Verbose, "USN: %d of %d changes queued on %c:",
+                queued, static_cast<int>(affectedParents.size()), m_driveLetter);
         }
 
         // Persist the bookmark

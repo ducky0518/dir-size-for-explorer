@@ -6,6 +6,15 @@
 
 namespace dirsize {
 
+// Check whether `path` is equal to or a child of `dir` (case-insensitive).
+static bool IsUnderDirectory(const std::wstring& path, const std::wstring& dir) {
+    if (path.size() < dir.size()) return false;
+    if (_wcsnicmp(path.c_str(), dir.c_str(), dir.size()) != 0) return false;
+    if (path.size() == dir.size()) return true;
+    if (!dir.empty() && dir.back() == L'\\') return true;
+    return path[dir.size()] == L'\\';
+}
+
 Scanner::Scanner(std::shared_ptr<Database> db, const Config& config)
     : m_db(std::move(db))
     , m_config(config)
@@ -37,13 +46,28 @@ void Scanner::Stop() {
     }
 }
 
-void Scanner::QueueRescan(const std::wstring& path) {
+bool Scanner::QueueRescan(const std::wstring& path) {
+    // Only rescan paths that fall under a watched directory.
+    {
+        std::lock_guard lock(m_configMutex);
+        bool underWatched = false;
+        for (const auto& watchedDir : m_config.watchedDirs) {
+            if (IsUnderDirectory(path, watchedDir)) {
+                underWatched = true;
+                break;
+            }
+        }
+        if (!underWatched) {
+            return false;
+        }
+    }
     {
         std::lock_guard lock(m_queueMutex);
         m_rescanQueue.push(path);
     }
     Log(LogSeverity::Verbose, L"Rescan queued: %s", path.c_str());
     if (m_rescanEvent) SetEvent(m_rescanEvent);
+    return true;
 }
 
 void Scanner::ReloadConfig() {
