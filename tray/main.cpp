@@ -6,12 +6,18 @@
 #include <shellapi.h>
 #include <objbase.h>
 #include <CommCtrl.h>
+#include <exdisp.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <Shldisp.h>
 
 #include <algorithm>
 #include <cstring>
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' " \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' " \
     "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' " \
@@ -32,6 +38,96 @@ HICON    g_hAnimFrames[4] = {};
 int      g_animFrame = 0;
 bool     g_isScanning = false;
 int      g_pollFailures = 0;       // consecutive failed polls
+
+// ---------------------------------------------------------------------------
+// Detect whether the current process is running elevated (admin).
+// ---------------------------------------------------------------------------
+bool IsProcessElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    TOKEN_ELEVATION elevation = {};
+    DWORD size = 0;
+    BOOL ok = GetTokenInformation(token, TokenElevation,
+                                  &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated;
+}
+
+// ---------------------------------------------------------------------------
+// Launch a copy of ourselves through the desktop shell (Explorer), which
+// always runs non-elevated.  This is the Microsoft-documented way to start
+// a medium-integrity process from an elevated context.
+// ---------------------------------------------------------------------------
+bool LaunchNonElevated(const wchar_t* path) {
+    IShellWindows* shellWindows = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellWindows, nullptr,
+                                  CLSCTX_LOCAL_SERVER,
+                                  IID_PPV_ARGS(&shellWindows));
+    if (FAILED(hr)) return false;
+
+    VARIANT vtLoc = {};
+    vtLoc.vt = VT_I4;
+    vtLoc.lVal = CSIDL_DESKTOP;
+    VARIANT vtEmpty = {};
+    vtEmpty.vt = VT_EMPTY;
+    long hwnd = 0;
+    IDispatch* disp = nullptr;
+    hr = shellWindows->FindWindowSW(&vtLoc, &vtEmpty, SWC_DESKTOP,
+                                     &hwnd, SWFO_NEEDDISPATCH, &disp);
+    shellWindows->Release();
+    if (FAILED(hr) || !disp) return false;
+
+    IServiceProvider* sp = nullptr;
+    hr = disp->QueryInterface(IID_PPV_ARGS(&sp));
+    disp->Release();
+    if (FAILED(hr)) return false;
+
+    IShellBrowser* browser = nullptr;
+    hr = sp->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser));
+    sp->Release();
+    if (FAILED(hr)) return false;
+
+    IShellView* view = nullptr;
+    hr = browser->QueryActiveShellView(&view);
+    browser->Release();
+    if (FAILED(hr)) return false;
+
+    IDispatch* bgDisp = nullptr;
+    hr = view->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&bgDisp));
+    view->Release();
+    if (FAILED(hr)) return false;
+
+    IShellFolderViewDual* folderView = nullptr;
+    hr = bgDisp->QueryInterface(IID_PPV_ARGS(&folderView));
+    bgDisp->Release();
+    if (FAILED(hr)) return false;
+
+    IDispatch* appDisp = nullptr;
+    hr = folderView->get_Application(&appDisp);
+    folderView->Release();
+    if (FAILED(hr)) return false;
+
+    IShellDispatch2* shell = nullptr;
+    hr = appDisp->QueryInterface(IID_PPV_ARGS(&shell));
+    appDisp->Release();
+    if (FAILED(hr)) return false;
+
+    BSTR bstrPath = SysAllocString(path);
+    VARIANT vArgs = {}, vDir = {}, vOp = {}, vShow = {};
+    vArgs.vt = vDir.vt = VT_EMPTY;
+    vOp.vt = VT_BSTR;
+    vOp.bstrVal = SysAllocString(L"open");
+    vShow.vt = VT_I4;
+    vShow.lVal = SW_SHOWNORMAL;
+
+    hr = shell->ShellExecute(bstrPath, vArgs, vDir, vOp, vShow);
+
+    SysFreeString(bstrPath);
+    SysFreeString(vOp.bstrVal);
+    shell->Release();
+    return SUCCEEDED(hr);
+}
 
 // ---------------------------------------------------------------------------
 // Build four animation-frame icons with a green "scan line" that sweeps
@@ -293,8 +389,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     icex.dwICC = ICC_TAB_CLASSES | ICC_UPDOWN_CLASS;
     InitCommonControlsEx(&icex);
 
-    // Initialize COM (needed for SHBrowseForFolder)
+    // Initialize COM (needed for SHBrowseForFolder and shell broker)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // If running elevated (e.g. launched by the MSI installer), relaunch
+    // as a normal-integrity process so the tray icon is visible to Explorer.
+    if (IsProcessElevated()) {
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        LaunchNonElevated(exePath);
+        CoUninitialize();
+        return 0;
+    }
 
     // Create a hidden window for message handling
     WNDCLASSEXW wc = {};
