@@ -53,3 +53,8 @@
 // Timer for tray
 #define IDT_TRAY_TIMER          400
 #define IDT_LOG_POLL            401
+#define IDT_SCAN_ANIM           402
+
+// Custom window message: Logging tab → main window with scanning state
+// wParam: 1 = scanning, 0 = idle
+#define WM_SCAN_STATE           (WM_USER + 2)

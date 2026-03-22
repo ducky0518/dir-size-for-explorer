@@ -58,6 +58,12 @@ void Scanner::ReloadConfig() {
     if (m_rescanEvent) SetEvent(m_rescanEvent);
 }
 
+void Scanner::RequestFullScan() {
+    m_fullScanRequested.store(true);
+    Log(LogSeverity::Info, "Full scan requested");
+    if (m_rescanEvent) SetEvent(m_rescanEvent);
+}
+
 std::wstring Scanner::GetCurrentPath() const {
     std::lock_guard lock(m_stateMutex);
     return m_currentScanPath;
@@ -90,25 +96,25 @@ void Scanner::SchedulerThread() {
             break;
         }
 
-        // Process any queued rescans
+        // Process any queued rescans (incremental — don't set m_scanning
+        // so the tray icon only animates during full scans, not brief
+        // single-directory rescans from the change journal).
         {
             std::lock_guard lock(m_queueMutex);
             while (!m_rescanQueue.empty()) {
                 std::wstring path = std::move(m_rescanQueue.front());
                 m_rescanQueue.pop();
 
-                m_scanning.store(true);
                 std::vector<DirEntry> entries;
                 ScanDirectory(path, 0, entries);
                 if (!entries.empty()) {
                     m_db->UpsertEntries(entries);
                 }
-                m_scanning.store(false);
             }
         }
 
-        // If woken by timeout (not rescan event), do a full scan
-        if (waitResult == WAIT_TIMEOUT) {
+        // Full scan on timeout or explicit request
+        if (waitResult == WAIT_TIMEOUT || m_fullScanRequested.exchange(false)) {
             FullScan();
         }
     }

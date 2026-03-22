@@ -282,6 +282,11 @@ static void RefreshLog(HWND hDlg) {
     }
     SetDlgItemTextW(hDlg, IDC_LOG_STATUS, statusText);
 
+    // Notify the main tray window so the icon animation stays in sync
+    HWND hOwner = GetWindow(hDlg, GW_OWNER);
+    if (hOwner)
+        PostMessage(hOwner, WM_SCAN_STATE, statusInfo.isScanning, 0);
+
     // Parse and display log entries
     HWND hEdit = GetDlgItem(hDlg, IDC_LOG_EDIT);
     std::wstring appendBuf;
