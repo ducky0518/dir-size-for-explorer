@@ -54,6 +54,11 @@ BEGIN
     AUTORADIOBUTTON "Files and folders", IDC_RADIO_SCALE_ALL,
                     125, 116, 90, 10
 
+    // --- About Tab Controls (initially hidden) ---
+    LTEXT           "", IDC_ABOUT_TITLE, 20, 40, 300, 12
+    LTEXT           "", IDC_ABOUT_DESC,  20, 60, 300, 50
+    CONTROL         "", IDC_ABOUT_LINK, "SysLink", 0, 20, 120, 300, 14
+
     // --- Logging Tab Controls (initially hidden) ---
     LTEXT           "", IDC_LOG_STATUS, 20, 30, 305, 20
     EDITTEXT        IDC_LOG_EDIT, 20, 52, 305, 165,
