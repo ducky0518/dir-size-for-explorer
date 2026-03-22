@@ -48,6 +48,9 @@ public:
 
     // --- Size queries (used by shell extension) ---
 
+    // Get total number of entries in the database.
+    uint64_t GetEntryCount();
+
     // Look up the cached total size for a directory path.
     // Returns nullopt if not found.
     std::optional<uint64_t> GetSize(const std::wstring& path);

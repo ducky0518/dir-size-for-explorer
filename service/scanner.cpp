@@ -1,4 +1,5 @@
 #include "scanner.h"
+#include "log_buffer.h"
 
 #include <chrono>
 #include <algorithm>
@@ -41,6 +42,7 @@ void Scanner::QueueRescan(const std::wstring& path) {
         std::lock_guard lock(m_queueMutex);
         m_rescanQueue.push(path);
     }
+    Log(LogSeverity::Verbose, L"Rescan queued: %s", path.c_str());
     if (m_rescanEvent) SetEvent(m_rescanEvent);
 }
 
@@ -51,8 +53,19 @@ void Scanner::ReloadConfig() {
         m_config = newConfig;
         m_throttle.SetLevel(newConfig.ioPriority);
     }
+    Log(LogSeverity::Info, "Configuration reloaded");
     // Wake the scheduler so it picks up the new interval
     if (m_rescanEvent) SetEvent(m_rescanEvent);
+}
+
+std::wstring Scanner::GetCurrentPath() const {
+    std::lock_guard lock(m_stateMutex);
+    return m_currentScanPath;
+}
+
+int64_t Scanner::GetLastFullScanTime() const {
+    std::lock_guard lock(m_stateMutex);
+    return m_lastFullScanTime;
 }
 
 void Scanner::SchedulerThread() {
@@ -110,11 +123,27 @@ void Scanner::FullScan() {
         watchedDirs = m_config.watchedDirs;
     }
 
+    Log(LogSeverity::Info, "Full scan started (%d directories)",
+        static_cast<int>(watchedDirs.size()));
+    auto fullScanStart = std::chrono::steady_clock::now();
+
     for (const auto& rootDir : watchedDirs) {
         if (WaitForSingleObject(m_stopEvent, 0) == WAIT_OBJECT_0) break;
 
+        {
+            std::lock_guard lock(m_stateMutex);
+            m_currentScanPath = rootDir;
+        }
+        Log(LogSeverity::Verbose, L"Scanning %s", rootDir.c_str());
+        auto dirStart = std::chrono::steady_clock::now();
+
         std::vector<DirEntry> entries;
-        ScanDirectory(rootDir, 0, entries);
+        ScanResult result = ScanDirectory(rootDir, 0, entries);
+
+        auto dirElapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - dirStart).count();
+        Log(LogSeverity::Info, L"Scanned %s \u2014 %llu files, %llu dirs, %.1fs",
+            rootDir.c_str(), result.fileCount, result.dirCount, dirElapsed);
 
         // Batch write in chunks to avoid holding the DB lock too long
         constexpr size_t kBatchSize = 500;
@@ -126,6 +155,18 @@ void Scanner::FullScan() {
             m_db->UpsertEntries(batch);
         }
     }
+
+    {
+        std::lock_guard lock(m_stateMutex);
+        m_currentScanPath.clear();
+        auto now = std::chrono::system_clock::now();
+        m_lastFullScanTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+    }
+
+    auto fullElapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - fullScanStart).count();
+    Log(LogSeverity::Info, "Full scan completed in %.1f seconds", fullElapsed);
 
     m_scanning.store(false);
 }
@@ -154,6 +195,10 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
         FIND_FIRST_EX_LARGE_FETCH);
 
     if (hFind == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED) {
+            Log(LogSeverity::Verbose, L"Access denied: %s", rootPath.c_str());
+        }
         return result;
     }
 

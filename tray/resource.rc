@@ -54,6 +54,15 @@ BEGIN
     AUTORADIOBUTTON "Files and folders", IDC_RADIO_SCALE_ALL,
                     125, 116, 90, 10
 
+    // --- Logging Tab Controls (initially hidden) ---
+    LTEXT           "", IDC_LOG_STATUS, 20, 30, 305, 20
+    EDITTEXT        IDC_LOG_EDIT, 20, 52, 305, 165,
+                    ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER
+    PUSHBUTTON      "Clear", IDC_BTN_LOG_CLEAR, 20, 222, 40, 14
+    PUSHBUTTON      "Copy", IDC_BTN_LOG_COPY, 65, 222, 40, 14
+    LTEXT           "Verbosity:", IDC_LBL_LOG_VERBOSITY, 200, 224, 40, 10
+    COMBOBOX        IDC_LOG_VERBOSITY, 245, 222, 80, 60, CBS_DROPDOWNLIST | WS_VSCROLL
+
     // --- Bottom buttons ---
     DEFPUSHBUTTON   "OK", IDC_BTN_OK, 170, 255, 50, 14
     PUSHBUTTON      "Cancel", IDC_BTN_CANCEL, 225, 255, 50, 14

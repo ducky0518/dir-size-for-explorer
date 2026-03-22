@@ -6,6 +6,8 @@
 #include <CommCtrl.h>
 #include <ShlObj.h>
 
+#include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -29,15 +31,26 @@ const int kDisplayControls[] = {
     IDC_RADIO_SCALE_FOLDERS, IDC_RADIO_SCALE_ALL
 };
 
+// Control IDs for the logging tab
+const int kLoggingControls[] = {
+    IDC_LOG_STATUS, IDC_LOG_EDIT,
+    IDC_BTN_LOG_CLEAR, IDC_BTN_LOG_COPY,
+    IDC_LBL_LOG_VERBOSITY, IDC_LOG_VERBOSITY
+};
+
+// Logging tab state
+static uint32_t s_lastSeqNum = 0;
+static LogSeverity s_verbosityFilter = LogSeverity::Info;
+
 void ShowTabControls(HWND hDlg, int tabIndex) {
-    // Show/hide controls based on active tab
     for (int id : kScannerControls) {
         ShowWindow(GetDlgItem(hDlg, id), tabIndex == 0 ? SW_SHOW : SW_HIDE);
     }
-    // Also show/hide the static labels (they have id -1, so we use
-    // enumeration or just manage by tab index)
     for (int id : kDisplayControls) {
         ShowWindow(GetDlgItem(hDlg, id), tabIndex == 1 ? SW_SHOW : SW_HIDE);
+    }
+    for (int id : kLoggingControls) {
+        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 2 ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -162,6 +175,165 @@ void BrowseForFolder(HWND hDlg) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Logging tab helpers
+// ---------------------------------------------------------------------------
+
+static void AppendLogText(HWND hEdit, const wchar_t* text) {
+    int len = GetWindowTextLengthW(hEdit);
+    // Prevent unbounded growth — clear if over 256K chars
+    if (len > 256 * 1024) {
+        SetWindowTextW(hEdit, L"");
+        len = 0;
+    }
+    SendMessageW(hEdit, EM_SETSEL, len, len);
+    SendMessageW(hEdit, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text));
+}
+
+static std::wstring Utf8ToWide(const char* utf8, int len) {
+    if (!utf8 || len == 0) return {};
+    int size = MultiByteToWideChar(CP_UTF8, 0, utf8, len, nullptr, 0);
+    std::wstring result(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8, len, result.data(), size);
+    return result;
+}
+
+static std::wstring FormatFileSize(uint64_t bytes) {
+    wchar_t buf[64];
+    if (bytes >= 1024ULL * 1024 * 1024) {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%.1f GB",
+                     bytes / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL * 1024) {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%.1f MB",
+                     bytes / (1024.0 * 1024.0));
+    } else if (bytes >= 1024) {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%.1f KB",
+                     bytes / 1024.0);
+    } else {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%llu bytes", bytes);
+    }
+    return buf;
+}
+
+static void RefreshLog(HWND hDlg) {
+    IpcStatus status;
+    uint32_t latestSeqNum = 0;
+    std::vector<uint8_t> data;
+
+    if (!SendGetLog(s_lastSeqNum, status, latestSeqNum, data, 1500)) {
+        // Don't overwrite a good status with "not connected" on a transient failure
+        // Only show "not connected" if we've never received data
+        if (s_lastSeqNum == 0) {
+            SetDlgItemTextW(hDlg, IDC_LOG_STATUS, L"Service not connected");
+        }
+        return;
+    }
+
+    // Check truncation bit
+    bool truncated = (latestSeqNum & 0x80000000u) != 0;
+    latestSeqNum &= 0x7FFFFFFFu;
+
+    if (truncated) {
+        SetDlgItemTextW(hDlg, IDC_LOG_EDIT, L"");
+    }
+    s_lastSeqNum = latestSeqNum;
+
+    if (data.size() < sizeof(ServiceStatusWire)) {
+        return;
+    }
+
+    // Parse ServiceStatusWire
+    size_t offset = 0;
+    ServiceStatusWire statusInfo;
+    std::memcpy(&statusInfo, data.data() + offset, sizeof(ServiceStatusWire));
+    offset += sizeof(ServiceStatusWire);
+
+    // Read current scan path
+    std::wstring currentPath;
+    if (statusInfo.currentPathLength > 0 &&
+        offset + statusInfo.currentPathLength <= data.size()) {
+        currentPath = Utf8ToWide(
+            reinterpret_cast<const char*>(data.data() + offset),
+            statusInfo.currentPathLength);
+        offset += statusInfo.currentPathLength;
+    }
+
+    // Build status text
+    wchar_t statusText[512];
+    if (statusInfo.isScanning && !currentPath.empty()) {
+        _snwprintf_s(statusText, _countof(statusText), _TRUNCATE,
+            L"Status: Scanning %s | DB: %llu entries (%s)",
+            currentPath.c_str(), statusInfo.dbEntryCount,
+            FormatFileSize(statusInfo.dbSizeBytes).c_str());
+    } else {
+        // Format last scan time
+        wchar_t timeStr[32] = L"Never";
+        if (statusInfo.lastScanTimestamp > 0) {
+            time_t t = static_cast<time_t>(statusInfo.lastScanTimestamp / 1000);
+            struct tm localTm;
+            localtime_s(&localTm, &t);
+            wcsftime(timeStr, _countof(timeStr), L"%I:%M %p", &localTm);
+        }
+        _snwprintf_s(statusText, _countof(statusText), _TRUNCATE,
+            L"Status: Idle | DB: %llu entries (%s) | Last scan: %s",
+            statusInfo.dbEntryCount,
+            FormatFileSize(statusInfo.dbSizeBytes).c_str(),
+            timeStr);
+    }
+    SetDlgItemTextW(hDlg, IDC_LOG_STATUS, statusText);
+
+    // Parse and display log entries
+    HWND hEdit = GetDlgItem(hDlg, IDC_LOG_EDIT);
+    std::wstring appendBuf;
+
+    while (offset + sizeof(LogEntryWire) <= data.size()) {
+        LogEntryWire wire;
+        std::memcpy(&wire, data.data() + offset, sizeof(LogEntryWire));
+        offset += sizeof(LogEntryWire);
+
+        if (offset + wire.messageLength > data.size()) {
+            break;
+        }
+
+        std::string msgUtf8(
+            reinterpret_cast<const char*>(data.data() + offset),
+            wire.messageLength);
+        offset += wire.messageLength;
+
+        // Apply verbosity filter (client-side)
+        if (static_cast<uint8_t>(wire.severity) >
+            static_cast<uint8_t>(s_verbosityFilter)) {
+            continue;
+        }
+
+        // Format timestamp as HH:MM:SS
+        time_t t = static_cast<time_t>(wire.timestampMs / 1000);
+        struct tm localTm;
+        localtime_s(&localTm, &t);
+        wchar_t timeStr[16];
+        wcsftime(timeStr, _countof(timeStr), L"%H:%M:%S", &localTm);
+
+        // Severity label
+        const wchar_t* sevLabel = L"";
+        if (wire.severity == LogSeverity::Error) sevLabel = L"ERR  ";
+        else if (wire.severity == LogSeverity::Verbose) sevLabel = L"DBG  ";
+
+        std::wstring msgWide = Utf8ToWide(msgUtf8.c_str(),
+                                           static_cast<int>(msgUtf8.size()));
+
+        appendBuf += L"[";
+        appendBuf += timeStr;
+        appendBuf += L"] ";
+        appendBuf += sevLabel;
+        appendBuf += msgWide;
+        appendBuf += L"\r\n";
+    }
+
+    if (!appendBuf.empty()) {
+        AppendLogText(hEdit, appendBuf.c_str());
+    }
+}
+
 } // namespace
 
 INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
@@ -179,7 +351,24 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         tie.pszText = const_cast<LPWSTR>(L"Display");
         TabCtrl_InsertItem(hTab, 1, &tie);
 
+        tie.pszText = const_cast<LPWSTR>(L"Logging");
+        TabCtrl_InsertItem(hTab, 2, &tie);
+
         LoadSettingsToDialog(hDlg);
+
+        // Initialize logging tab controls
+        HWND hVerbosity = GetDlgItem(hDlg, IDC_LOG_VERBOSITY);
+        SendMessageW(hVerbosity, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"Errors only"));
+        SendMessageW(hVerbosity, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"Normal"));
+        SendMessageW(hVerbosity, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L"Verbose"));
+        SendMessageW(hVerbosity, CB_SETCURSEL, 1, 0);  // Default: Normal
+
+        // Set edit control text limit
+        SendDlgItemMessageW(hDlg, IDC_LOG_EDIT, EM_SETLIMITTEXT, 256 * 1024, 0);
+
         ShowTabControls(hDlg, 0);
         return TRUE;
     }
@@ -189,19 +378,35 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         if (pnmh && pnmh->idFrom == IDC_TAB_CONTROL && pnmh->code == TCN_SELCHANGE) {
             int tabIndex = TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_TAB_CONTROL));
             ShowTabControls(hDlg, tabIndex);
+
+            if (tabIndex == 2) {
+                // Start polling and do an immediate refresh
+                SetTimer(hDlg, IDT_LOG_POLL, 2000, nullptr);
+                RefreshLog(hDlg);
+            } else {
+                KillTimer(hDlg, IDT_LOG_POLL);
+            }
         }
         break;
     }
+
+    case WM_TIMER:
+        if (wParam == IDT_LOG_POLL) {
+            RefreshLog(hDlg);
+        }
+        return TRUE;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_BTN_OK:
             if (SaveSettingsFromDialog(hDlg)) {
+                KillTimer(hDlg, IDT_LOG_POLL);
                 DestroyWindow(hDlg);
             }
             return TRUE;
 
         case IDC_BTN_CANCEL:
+            KillTimer(hDlg, IDT_LOG_POLL);
             DestroyWindow(hDlg);
             return TRUE;
 
@@ -229,10 +434,37 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
             }
             return TRUE;
         }
+
+        case IDC_BTN_LOG_CLEAR:
+            SetDlgItemTextW(hDlg, IDC_LOG_EDIT, L"");
+            s_lastSeqNum = 0;
+            return TRUE;
+
+        case IDC_BTN_LOG_COPY: {
+            HWND hEdit = GetDlgItem(hDlg, IDC_LOG_EDIT);
+            SendMessageW(hEdit, EM_SETSEL, 0, -1);
+            SendMessageW(hEdit, WM_COPY, 0, 0);
+            SendMessageW(hEdit, EM_SETSEL, -1, -1);
+            return TRUE;
+        }
+
+        case IDC_LOG_VERBOSITY:
+            if (HIWORD(wParam) == CBN_SELCHANGE) {
+                int sel = static_cast<int>(
+                    SendDlgItemMessageW(hDlg, IDC_LOG_VERBOSITY,
+                                        CB_GETCURSEL, 0, 0));
+                s_verbosityFilter = static_cast<LogSeverity>(sel);
+                // Clear and re-fetch to apply new filter
+                SetDlgItemTextW(hDlg, IDC_LOG_EDIT, L"");
+                s_lastSeqNum = 0;
+                RefreshLog(hDlg);
+            }
+            return TRUE;
         }
         break;
 
     case WM_CLOSE:
+        KillTimer(hDlg, IDT_LOG_POLL);
         DestroyWindow(hDlg);
         return TRUE;
     }
