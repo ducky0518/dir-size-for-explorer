@@ -5,6 +5,7 @@
 
 #include <CommCtrl.h>
 #include <ShlObj.h>
+#include <shellapi.h>
 
 #include <cstring>
 #include <ctime>
@@ -38,6 +39,11 @@ const int kLoggingControls[] = {
     IDC_LBL_LOG_VERBOSITY, IDC_LOG_VERBOSITY
 };
 
+// Control IDs for the about tab
+const int kAboutControls[] = {
+    IDC_ABOUT_TITLE, IDC_ABOUT_DESC, IDC_ABOUT_LINK
+};
+
 // Logging tab state
 static uint32_t s_lastSeqNum = 0;
 static LogSeverity s_verbosityFilter = LogSeverity::Info;
@@ -51,6 +57,9 @@ void ShowTabControls(HWND hDlg, int tabIndex) {
     }
     for (int id : kLoggingControls) {
         ShowWindow(GetDlgItem(hDlg, id), tabIndex == 2 ? SW_SHOW : SW_HIDE);
+    }
+    for (int id : kAboutControls) {
+        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 3 ? SW_SHOW : SW_HIDE);
     }
 }
 
@@ -359,7 +368,21 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         tie.pszText = const_cast<LPWSTR>(L"Logging");
         TabCtrl_InsertItem(hTab, 2, &tie);
 
+        tie.pszText = const_cast<LPWSTR>(L"About");
+        TabCtrl_InsertItem(hTab, 3, &tie);
+
         LoadSettingsToDialog(hDlg);
+
+        // Initialize About tab controls
+        SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE, L"DirSize for Explorer  v1.0");
+        SetDlgItemTextW(hDlg, IDC_ABOUT_DESC,
+            L"Adds a directory size column to Windows Explorer. "
+            L"A background service scans the filesystem and stores sizes in a local database. "
+            L"A COM shell extension injects the cached sizes into Explorer\x2019s built-in Size column.\r\n\r\n"
+            L"Source code and documentation:");
+        SetDlgItemTextW(hDlg, IDC_ABOUT_LINK,
+            L"<a href=\"https://github.com/ducky0518/dir-size-for-explorer\">"
+            L"https://github.com/ducky0518/dir-size-for-explorer</a>");
 
         // Initialize logging tab controls
         HWND hVerbosity = GetDlgItem(hDlg, IDC_LOG_VERBOSITY);
@@ -380,7 +403,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
 
     case WM_NOTIFY: {
         NMHDR* pnmh = reinterpret_cast<NMHDR*>(lParam);
-        if (pnmh && pnmh->idFrom == IDC_TAB_CONTROL && pnmh->code == TCN_SELCHANGE) {
+        if (!pnmh) break;
+
+        if (pnmh->idFrom == IDC_TAB_CONTROL && pnmh->code == TCN_SELCHANGE) {
             int tabIndex = TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_TAB_CONTROL));
             ShowTabControls(hDlg, tabIndex);
 
@@ -391,6 +416,15 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
             } else {
                 KillTimer(hDlg, IDT_LOG_POLL);
             }
+        }
+
+        // About tab hyperlink click
+        if ((pnmh->code == NM_CLICK || pnmh->code == NM_RETURN) &&
+            pnmh->idFrom == IDC_ABOUT_LINK) {
+            NMLINK* pnml = reinterpret_cast<NMLINK*>(lParam);
+            ShellExecuteW(hDlg, L"open", pnml->item.szUrl,
+                          nullptr, nullptr, SW_SHOWNORMAL);
+            return TRUE;
         }
         break;
     }
