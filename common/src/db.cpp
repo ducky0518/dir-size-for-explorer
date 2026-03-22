@@ -215,6 +215,21 @@ std::wstring Database::NormalizePath(const std::wstring& path) {
     return normalized;
 }
 
+uint64_t Database::GetEntryCount() {
+    std::lock_guard lock(m_mutex);
+    if (!m_db) return 0;
+
+    uint64_t count = 0;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM dir_sizes", -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return count;
+}
+
 std::optional<uint64_t> Database::GetSize(const std::wstring& path) {
     std::lock_guard lock(m_mutex);
     if (!m_stmtGetSize) return std::nullopt;

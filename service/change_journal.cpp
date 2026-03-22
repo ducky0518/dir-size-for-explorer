@@ -1,5 +1,6 @@
 #include "change_journal.h"
 #include "scanner.h"
+#include "log_buffer.h"
 
 #include <set>
 #include <string>
@@ -35,6 +36,7 @@ bool ChangeJournalMonitor::Start(wchar_t driveLetter, HANDLE stopEvent) {
         nullptr);
 
     if (m_volumeHandle == INVALID_HANDLE_VALUE) {
+        Log(LogSeverity::Error, "Failed to open volume %c:", driveLetter);
         return false;
     }
 
@@ -47,6 +49,7 @@ bool ChangeJournalMonitor::Start(wchar_t driveLetter, HANDLE stopEvent) {
             nullptr, 0,
             &journalData, sizeof(journalData),
             &bytesReturned, nullptr)) {
+        Log(LogSeverity::Error, "Failed to query change journal for %c:", driveLetter);
         CloseHandle(m_volumeHandle);
         m_volumeHandle = INVALID_HANDLE_VALUE;
         return false;
@@ -65,6 +68,7 @@ bool ChangeJournalMonitor::Start(wchar_t driveLetter, HANDLE stopEvent) {
         m_lastUsn = journalData.NextUsn;
     }
 
+    Log(LogSeverity::Info, "Change journal monitor started for %c:", driveLetter);
     m_running.store(true);
     m_monitorThread = std::thread(&ChangeJournalMonitor::MonitorThread, this);
     return true;
@@ -116,6 +120,8 @@ void ChangeJournalMonitor::MonitorThread() {
             DWORD err = GetLastError();
             if (err == ERROR_JOURNAL_ENTRY_DELETED) {
                 // Journal wrapped around; reset to current position
+                Log(LogSeverity::Error, "USN journal wrapped for %c: — resetting",
+                    m_driveLetter);
                 USN_JOURNAL_DATA_V0 journalData = {};
                 DeviceIoControl(m_volumeHandle, FSCTL_QUERY_USN_JOURNAL,
                                 nullptr, 0, &journalData, sizeof(journalData),
@@ -152,6 +158,10 @@ void ChangeJournalMonitor::MonitorThread() {
         m_lastUsn = nextUsn;
 
         // Resolve parent references to paths and queue rescans
+        if (!affectedParents.empty()) {
+            Log(LogSeverity::Verbose, "USN: %d changed paths on %c:",
+                static_cast<int>(affectedParents.size()), m_driveLetter);
+        }
         for (DWORDLONG parentRef : affectedParents) {
             std::wstring parentPath = ResolveFileReference(parentRef);
             if (!parentPath.empty()) {

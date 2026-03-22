@@ -5,6 +5,7 @@ add_executable(DirSizeSvc
     throttle.cpp
     ipc_server.cpp
     change_journal.cpp
+    log_buffer.cpp
 )
 
 target_link_libraries(DirSizeSvc PRIVATE

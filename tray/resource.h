@@ -36,6 +36,14 @@
 #define IDC_BTN_CANCEL          231
 #define IDC_BTN_APPLY           232
 
+// Logging tab controls
+#define IDC_LOG_STATUS          240
+#define IDC_LOG_EDIT            241
+#define IDC_BTN_LOG_CLEAR       242
+#define IDC_BTN_LOG_COPY        243
+#define IDC_LBL_LOG_VERBOSITY   244
+#define IDC_LOG_VERBOSITY       245
+
 // Tray menu commands
 #define IDM_SETTINGS            301
 #define IDM_SCAN_NOW            302
@@ -44,3 +52,4 @@
 
 // Timer for tray
 #define IDT_TRAY_TIMER          400
+#define IDT_LOG_POLL            401

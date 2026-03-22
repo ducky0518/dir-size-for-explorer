@@ -2,6 +2,7 @@
 #include "scanner.h"
 #include "ipc_server.h"
 #include "change_journal.h"
+#include "log_buffer.h"
 #include "dirsize/config.h"
 #include "dirsize/db.h"
 
@@ -44,6 +45,7 @@ DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD /*eventType*/,
     switch (control) {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
+        Log(LogSeverity::Info, "Service stop requested");
         ReportServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 5000);
         SetEvent(g_stopEvent);
         return NO_ERROR;
@@ -62,6 +64,7 @@ void WINAPI ServiceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
     if (!g_statusHandle) return;
 
     ReportServiceStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
+    Log(LogSeverity::Info, "Service starting");
 
     // Create the global stop event
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -73,6 +76,7 @@ void WINAPI ServiceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
     // Open the database in read-write mode
     auto db = std::make_shared<Database>();
     if (!db->Open(Database::GetDefaultPath(), false)) {
+        Log(LogSeverity::Error, "Failed to open database");
         ReportServiceStatus(SERVICE_STOPPED, ERROR_DATABASE_FAILURE);
         CloseHandle(g_stopEvent);
         return;
@@ -109,6 +113,9 @@ void WINAPI ServiceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
     }
 
     // Service is now running
+    Log(LogSeverity::Info, "Service running — %d watched dirs, change journal %s",
+        static_cast<int>(config.watchedDirs.size()),
+        config.useChangeJournal ? "on" : "off");
     ReportServiceStatus(SERVICE_RUNNING);
 
     // Wait for stop signal
@@ -125,6 +132,7 @@ void WINAPI ServiceMain(DWORD /*argc*/, LPWSTR* /*argv*/) {
     CloseHandle(g_stopEvent);
     g_stopEvent = nullptr;
 
+    Log(LogSeverity::Info, "Service stopped");
     ReportServiceStatus(SERVICE_STOPPED);
 }
 
