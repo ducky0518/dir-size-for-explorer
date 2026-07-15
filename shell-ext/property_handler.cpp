@@ -1,7 +1,11 @@
 #include "property_handler.h"
+#include "dirsize/config.h"
+#include "dirsize/generation.h"
 #include "dirsize/guids.h"
+#include "dirsize/path_utils.h"
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <propkey.h>
 
@@ -21,26 +25,21 @@ SizeCache& SizeCache::Instance() {
     return instance;
 }
 
-std::optional<uint64_t> SizeCache::Get(const std::wstring& path) {
+std::optional<CacheEntry> SizeCache::Lookup(const std::wstring& path) {
     std::shared_lock lock(m_mutex);
     auto it = m_cache.find(path);
-    if (it == m_cache.end() || !it->second.valid) return std::nullopt;
+    if (it == m_cache.end()) return std::nullopt;
+
+    // Stale if the engine wrote fresh size data since this was cached —
+    // this is what lets Explorer show new sizes immediately after a
+    // rescan instead of serving up-to-60s-old values.
+    if (it->second.generation != GetSizeDataGeneration()) return std::nullopt;
 
     auto age = std::chrono::steady_clock::now() - it->second.timestamp;
-    if (age > kTtl) return std::nullopt; // Stale
+    auto ttl = it->second.found ? kTtl : kNegativeTtl;
+    if (age > ttl) return std::nullopt; // Stale
 
-    return it->second.size;
-}
-
-std::optional<uint64_t> SizeCache::GetAlloc(const std::wstring& path) {
-    std::shared_lock lock(m_mutex);
-    auto it = m_cache.find(path);
-    if (it == m_cache.end() || !it->second.valid) return std::nullopt;
-
-    auto age = std::chrono::steady_clock::now() - it->second.timestamp;
-    if (age > kTtl) return std::nullopt;
-
-    return it->second.allocSize;
+    return it->second;
 }
 
 void SizeCache::Put(const std::wstring& path, uint64_t size, uint64_t allocSize) {
@@ -60,7 +59,27 @@ void SizeCache::Put(const std::wstring& path, uint64_t size, uint64_t allocSize)
     CacheEntry entry;
     entry.size = size;
     entry.allocSize = allocSize;
-    entry.valid = true;
+    entry.found = true;
+    entry.generation = GetSizeDataGeneration();
+    entry.timestamp = std::chrono::steady_clock::now();
+    m_cache[path] = entry;
+}
+
+void SizeCache::PutNegative(const std::wstring& path) {
+    std::unique_lock lock(m_mutex);
+
+    if (m_cache.size() >= kMaxEntries) {
+        auto it = m_cache.begin();
+        size_t toRemove = kMaxEntries / 2;
+        while (it != m_cache.end() && toRemove > 0) {
+            it = m_cache.erase(it);
+            toRemove--;
+        }
+    }
+
+    CacheEntry entry;
+    entry.found = false;
+    entry.generation = GetSizeDataGeneration();
     entry.timestamp = std::chrono::steady_clock::now();
     m_cache[path] = entry;
 }
@@ -74,13 +93,41 @@ void SizeCache::Invalidate(const std::wstring& path) {
 // Shared SQLite connection for the shell extension (read-only)
 // ---------------------------------------------------------------------------
 
-static Database& GetSharedDb() {
+Database& GetReadOnlyDb() {
     static Database db;
-    static std::once_flag initFlag;
-    std::call_once(initFlag, [] {
-        db.Open(Database::GetDefaultPath(), true /* readOnly */);
-    });
+    static std::mutex openMutex;
+    static ULONGLONG lastAttempt = 0;
+    constexpr ULONGLONG kRetryIntervalMs = 30000;
+
+    if (!db.IsOpen()) {
+        std::lock_guard lock(openMutex);
+        ULONGLONG now = GetTickCount64();
+        // Retry periodically: Explorer may start before the service has
+        // created the database; a single failed call_once left the shell
+        // extension permanently blind until the next Explorer restart.
+        if (!db.IsOpen() &&
+            (lastAttempt == 0 || now - lastAttempt >= kRetryIntervalMs)) {
+            lastAttempt = now;
+            db.Open(Database::GetDefaultPath(), true /* readOnly */);
+        }
+    }
     return db;
+}
+
+static Database& GetSharedDb() {
+    return GetReadOnlyDb();
+}
+
+static SizeMetric GetCurrentSizeMetric() {
+    static std::atomic<SizeMetric> s_metric{SizeMetric::LogicalSize};
+    static std::atomic<ULONGLONG> s_lastRead{0};
+
+    ULONGLONG now = GetTickCount64();
+    if (now - s_lastRead.load() > 30000) {
+        s_metric.store(static_cast<SizeMetric>(ReadRegDword(L"SizeMetric", 0)));
+        s_lastRead.store(now);
+    }
+    return s_metric.load();
 }
 
 // ---------------------------------------------------------------------------
@@ -128,25 +175,29 @@ ULONG DirSizePropertyHandler::Release() {
 HRESULT DirSizePropertyHandler::Initialize(LPCWSTR pszFilePath, DWORD /*grfMode*/) {
     if (!pszFilePath) return E_INVALIDARG;
 
-    m_path = pszFilePath;
-    // Normalize for cache/DB lookup
-    std::replace(m_path.begin(), m_path.end(), L'/', L'\\');
-    while (m_path.size() > 3 && m_path.back() == L'\\') {
-        m_path.pop_back();
-    }
-    std::transform(m_path.begin(), m_path.end(), m_path.begin(), ::towlower);
+    m_path = CanonicalizePath(pszFilePath);
+    m_cachedLogicalSize.reset();
+    m_cachedAllocSize.reset();
 
-    // Try in-memory cache first
-    m_cachedSize = SizeCache::Instance().Get(m_path);
-
-    if (!m_cachedSize) {
-        // Fall back to SQLite
-        auto& db = GetSharedDb();
-        auto entry = db.GetEntry(m_path);
-        if (entry) {
-            m_cachedSize = entry->totalSize;
-            SizeCache::Instance().Put(m_path, entry->totalSize, entry->allocSize);
+    // Try in-memory cache first (positive OR negative hit)
+    if (auto cached = SizeCache::Instance().Lookup(m_path)) {
+        if (cached->found) {
+            m_cachedLogicalSize = cached->size;
+            m_cachedAllocSize = cached->allocSize;
         }
+        return S_OK;
+    }
+
+    // Fall back to SQLite
+    auto& db = GetSharedDb();
+    if (!db.IsOpen()) return S_OK;
+
+    if (auto entry = db.GetEntry(m_path)) {
+        m_cachedLogicalSize = entry->totalSize;
+        m_cachedAllocSize = entry->allocSize;
+        SizeCache::Instance().Put(m_path, entry->totalSize, entry->allocSize);
+    } else {
+        SizeCache::Instance().PutNegative(m_path);
     }
 
     return S_OK;
@@ -171,10 +222,21 @@ HRESULT DirSizePropertyHandler::GetValue(REFPROPERTYKEY key, PROPVARIANT* pv) {
     if (!pv) return E_POINTER;
     PropVariantInit(pv);
 
-    // Respond to System.Size queries with our cached directory size
-    if (IsEqualPropertyKey(key, PKEY_Size) && m_cachedSize) {
+    // Respond to System.Size queries with current metric selection.
+    if (IsEqualPropertyKey(key, PKEY_Size)) {
+        std::optional<uint64_t> value;
+        if (GetCurrentSizeMetric() == SizeMetric::AllocationSize) {
+            value = m_cachedAllocSize ? m_cachedAllocSize : m_cachedLogicalSize;
+        } else {
+            value = m_cachedLogicalSize ? m_cachedLogicalSize : m_cachedAllocSize;
+        }
+
+        if (!value.has_value()) {
+            return S_OK;
+        }
+
         pv->vt = VT_UI8;
-        pv->uhVal.QuadPart = *m_cachedSize;
+        pv->uhVal.QuadPart = *value;
         return S_OK;
     }
 

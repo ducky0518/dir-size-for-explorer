@@ -24,7 +24,7 @@ void RunTestServer(HANDLE readyEvent, HANDLE stopEvent) {
     sa.bInheritHandle = FALSE;
 
     HANDLE hPipe = CreateNamedPipeW(
-        kPipeName,
+        GetPipeName().c_str(),
         PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         1, 4096, 4096, 0, &sa);
@@ -64,10 +64,25 @@ void RunTestServer(HANDLE readyEvent, HANDLE stopEvent) {
     CloseHandle(hPipe);
 }
 
+// The client helpers always target the session pipe name, so every test
+// that stands up its own mini-server races the REAL engine when DirSize
+// is installed and running: the client can connect to the engine's
+// instance while the test server waits forever for a connection. Skip in
+// that environment — these tests are for machines without a live engine.
+bool LiveEngineOnPipe() {
+    return WaitNamedPipeW(GetPipeName().c_str(), 1) ||
+           GetLastError() != ERROR_FILE_NOT_FOUND;
+}
+
 } // namespace
 
 void TestSendRecalculateCommand() {
     std::wcout << L"TestSendRecalculateCommand... ";
+    if (LiveEngineOnPipe()) {
+        std::wcout << L"SKIPPED (live engine on this session's pipe)"
+                   << std::endl;
+        return;
+    }
 
     HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -95,6 +110,11 @@ void TestSendRecalculateCommand() {
 
 void TestSendReloadConfigCommand() {
     std::wcout << L"TestSendReloadConfigCommand... ";
+    if (LiveEngineOnPipe()) {
+        std::wcout << L"SKIPPED (live engine on this session's pipe)"
+                   << std::endl;
+        return;
+    }
 
     HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -119,6 +139,15 @@ void TestSendReloadConfigCommand() {
 
 void TestSendToNonExistentService() {
     std::wcout << L"TestSendToNonExistentService... ";
+
+    // Only meaningful when no engine owns the session pipe. On a dev
+    // machine with DirSize installed, the real tray engine answers this
+    // pipe name — that's not the scenario under test.
+    if (LiveEngineOnPipe()) {
+        std::wcout << L"SKIPPED (live engine on this session's pipe)"
+                   << std::endl;
+        return;
+    }
 
     // No server running — should fail gracefully
     IpcStatus status;

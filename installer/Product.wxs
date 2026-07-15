@@ -5,7 +5,7 @@
 
   <Package Name="DirSize for Explorer"
            Manufacturer="DirSize Project"
-           Version="1.1.0.0"
+           Version="2.4.0.0"
            UpgradeCode="E8F1A2B3-C4D5-6E7F-8A9B-0C1D2E3F4A5B"
            InstallerVersion="500">
 
@@ -13,19 +13,28 @@
     <Icon Id="DirSizeIcon" SourceFile="tray\dirsize.ico" />
     <Property Id="ARPPRODUCTICON" Value="DirSizeIcon" />
 
-    <MajorUpgrade DowngradeErrorMessage=
+    <!-- AllowSameVersionUpgrades: a rebuilt MSI with an unchanged version
+         (common during development) replaces the installed copy instead of
+         adding a second Apps entry. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage=
         "A newer version of DirSize for Explorer is already installed." />
 
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- Close the tray app (which hosts the scan engine and holds
+         DirSizeTray.exe open) before files are installed, replaced, or
+         removed — on install, upgrade, AND uninstall. WM_CLOSE first for
+         a clean engine shutdown; terminate as a last resort. -->
+    <util:CloseApplication Id="CloseTrayApp"
+                           Target="DirSizeTray.exe"
+                           CloseMessage="yes"
+                           RebootPrompt="no"
+                           TerminateProcess="1" />
+
     <!-- Installation directory -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="DirSizeForExplorer" />
-    </StandardDirectory>
-
-    <!-- ProgramData directory for the database -->
-    <StandardDirectory Id="CommonAppDataFolder">
-      <Directory Id="DATAFOLDER" Name="DirSizeForExplorer" />
     </StandardDirectory>
 
     <!-- Start Menu shortcut -->
@@ -33,17 +42,15 @@
       <Directory Id="DirSizeMenuFolder" Name="DirSize for Explorer" />
     </StandardDirectory>
 
-    <!-- Features -->
+    <!-- Features. The tray app is required: it hosts the scan engine
+         (which runs in the user's session so mapped network drives and
+         the user's share credentials work). The database lives per-user
+         under %LocalAppData%, so no shared ProgramData folder is needed. -->
     <Feature Id="Core" Title="DirSize Core" Level="1"
-             Description="Shell extension and background service (required)"
+             Description="Shell extension, scan engine, and settings app (required)"
              AllowAbsent="no">
       <ComponentGroupRef Id="CoreComponents" />
-      <ComponentGroupRef Id="ServiceComponents" />
       <ComponentGroupRef Id="RegistryComponents" />
-    </Feature>
-
-    <Feature Id="TrayApp" Title="System Tray Settings" Level="1"
-             Description="System tray application for configuring DirSize settings">
       <ComponentGroupRef Id="TrayComponents" />
       <ComponentGroupRef Id="StartMenuComponents" />
     </Feature>
@@ -80,18 +87,30 @@
                Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
     </UI>
 
-    <!-- Custom action to register the property schema after install -->
+    <!-- Register the shell extension + property schema after install.
+         Note: the old "rundll32 propsys.dll,PSRegisterPropertySchema" call
+         never worked — PSRegisterPropertySchema does not have the rundll32
+         entry-point signature, so it was called with garbage arguments.
+         DllRegisterServer registers the schema (and the COM classes)
+         correctly.
+         Return="check": a failed registration must FAIL the install (and
+         roll back) instead of reporting success while Explorer integration
+         silently doesn't work. regsvr32 /s propagates DllRegisterServer's
+         HRESULT as a nonzero exit code. -->
     <CustomAction Id="RegisterPropertySchema"
                   Directory="INSTALLFOLDER"
-                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSRegisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  ExeCommand="regsvr32.exe /s &quot;[INSTALLFOLDER]DirSizeShellExt.dll&quot;"
                   Execute="deferred"
                   Impersonate="no"
-                  Return="ignore" />
+                  Return="check" />
 
-    <!-- Custom action to unregister the property schema on uninstall -->
+    <!-- Unregister on uninstall (also restores any property handler that
+         was displaced at install — see DllUnregisterServer). Keep
+         Return="ignore": a broken DLL must not make the product
+         un-uninstallable. -->
     <CustomAction Id="UnregisterPropertySchema"
                   Directory="INSTALLFOLDER"
-                  ExeCommand="cmd.exe /c &quot;rundll32.exe propsys.dll,PSUnregisterPropertySchema [INSTALLFOLDER]DirSizeTotalSize.propdesc&quot;"
+                  ExeCommand="regsvr32.exe /u /s &quot;[INSTALLFOLDER]DirSizeShellExt.dll&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
@@ -104,13 +123,36 @@
                   Impersonate="yes"
                   Return="ignore" />
 
+    <!-- Uninstall: Explorer has the hooked DLL pinned, so it must be
+         stopped BEFORE file removal (or the DLL stays locked until
+         reboot) and started again once removal is done. Anchored to
+         ProgramFiles64Folder because INSTALLFOLDER no longer exists by
+         InstallFinalize. Skipped during major upgrades — the new
+         version's RestartExplorer handles the restart there. -->
+    <CustomAction Id="KillExplorerUninstall"
+                  Directory="ProgramFiles64Folder"
+                  ExeCommand="taskkill.exe /f /im explorer.exe"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+    <CustomAction Id="StartExplorerUninstall"
+                  Directory="ProgramFiles64Folder"
+                  ExeCommand="cmd.exe /c start explorer.exe"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
       <Custom Action="RegisterPropertySchema" After="InstallFiles"
               Condition="NOT Installed" />
       <Custom Action="UnregisterPropertySchema" Before="RemoveFiles"
               Condition="Installed AND REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="KillExplorerUninstall" After="UnregisterPropertySchema"
+              Condition="Installed AND REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RestartExplorer" Before="InstallFinalize"
               Condition="NOT Installed" />
+      <Custom Action="StartExplorerUninstall" Before="InstallFinalize"
+              Condition="Installed AND REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
   </Package>

@@ -11,29 +11,45 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMEN
 CAPTION "DirSize for Explorer - Settings"
 FONT 9, "Segoe UI"
 BEGIN
-    CONTROL         "", IDC_TAB_CONTROL, WC_TABCONTROLW, 0,
+    // WS_CLIPSIBLINGS: the tab-page controls are SIBLINGS layered over the
+    // tab control's display area; without clipping, the tab's background
+    // painting can overpaint freshly shown controls (symptom: switching to
+    // a tab shows stale/blank content until something forces a repaint).
+    CONTROL         "", IDC_TAB_CONTROL, WC_TABCONTROLW, WS_CLIPSIBLINGS,
                     7, 7, 326, 240
 
     // These controls are positioned within the tab area and shown/hidden
     // based on the active tab. Coordinates are relative to the dialog.
 
     // --- Scanner Tab Controls ---
-    LTEXT           "Scan interval (minutes):", IDC_LBL_SCAN_INTERVAL, 20, 35, 90, 10
-    EDITTEXT        IDC_SCAN_INTERVAL, 115, 33, 40, 14, ES_NUMBER
+    LTEXT           "Default scan interval (min):", IDC_LBL_SCAN_INTERVAL, 20, 35, 100, 10
+    EDITTEXT        IDC_SCAN_INTERVAL, 122, 33, 35, 14, ES_NUMBER
     CONTROL         "", IDC_SPIN_INTERVAL, UPDOWN_CLASSW, UDS_SETBUDDYINT | UDS_AUTOBUDDY | UDS_ARROWKEYS,
-                    155, 33, 11, 14
+                    157, 33, 11, 14
 
     LTEXT           "IO Priority:", IDC_LBL_IO_PRIORITY, 200, 35, 45, 10
     COMBOBOX        IDC_IO_PRIORITY, 250, 33, 70, 60, CBS_DROPDOWNLIST | WS_VSCROLL
 
     LTEXT           "Watched directories:", IDC_LBL_WATCHED_DIRS, 20, 55, 90, 10
-    LISTBOX         IDC_WATCHED_LIST, 20, 67, 250, 80,
-                    LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER
+    CONTROL         "", IDC_WATCHED_LIST, WC_LISTVIEWW,
+                    LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+                    20, 67, 250, 55
     PUSHBUTTON      "Add...", IDC_BTN_ADD_DIR, 280, 67, 45, 14
     PUSHBUTTON      "Remove", IDC_BTN_REMOVE_DIR, 280, 85, 45, 14
+    LTEXT           "Interval:", IDC_LBL_DIR_INTERVAL, 280, 105, 45, 9
+    EDITTEXT        IDC_DIR_INTERVAL_EDIT, 280, 115, 28, 12, ES_NUMBER
+    PUSHBUTTON      "Set", IDC_BTN_SET_INTERVAL, 310, 115, 18, 12
 
-    AUTOCHECKBOX    "Use NTFS Change Journal for incremental updates",
-                    IDC_CHK_CHANGE_JOURNAL, 20, 155, 250, 10
+    LTEXT           "Exclude these directories:", IDC_LBL_EXCLUDED_DIRS, 20, 127, 110, 10
+    LISTBOX         IDC_EXCLUDED_LIST, 20, 139, 250, 45,
+                    LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL | WS_VSCROLL | WS_BORDER
+    PUSHBUTTON      "Add...", IDC_BTN_ADD_EXCL, 280, 139, 45, 14
+    PUSHBUTTON      "Remove", IDC_BTN_REMOVE_EXCL, 280, 157, 45, 14
+
+    AUTOCHECKBOX    "Watch for file changes (real-time size updates)",
+                    IDC_CHK_CHANGE_JOURNAL, 20, 192, 250, 10
+    AUTOCHECKBOX    "Follow watched folders when renamed or moved",
+                    IDC_CHK_TRACK_RENAMES, 20, 206, 250, 10
 
     // --- Display Tab Controls (initially hidden) ---
     // Size Metric group
@@ -53,6 +69,16 @@ BEGIN
                     40, 116, 80, 10, WS_GROUP
     AUTORADIOBUTTON "Files and folders", IDC_RADIO_SCALE_ALL,
                     125, 116, 90, 10
+
+    // --- Manual Scan Tab Controls (initially hidden) ---
+    LTEXT           "Scan any folder on demand. Sizes are cached and appear in Explorer right away - even for folders that are not part of a watched directory.",
+                    IDC_MANUAL_LABEL, 20, 33, 305, 18
+    PUSHBUTTON      "Browse && Scan...", IDC_BTN_MANUAL_SCAN, 20, 56, 75, 14
+    LTEXT           "", IDC_MANUAL_STATUS, 105, 59, 220, 10
+    LTEXT           "Recent manual scans:", IDC_MANUAL_HIST_LABEL, 20, 82, 100, 10
+    CONTROL         "", IDC_MANUAL_HISTORY, WC_LISTVIEWW,
+                    LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                    20, 94, 305, 125
 
     // --- About Tab Controls (initially hidden) ---
     LTEXT           "", IDC_ABOUT_TITLE, 20, 40, 300, 12

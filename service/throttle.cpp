@@ -5,16 +5,27 @@ namespace dirsize {
 IOThrottle::IOThrottle(IOPriorityLevel level) : m_level(level) {}
 
 void IOThrottle::Apply() {
+    // Leave background mode first if a previous Apply() enabled it;
+    // otherwise switching VeryLow -> Low/Normal keeps the thread stuck
+    // in background (very-low) priority forever.
+    if (m_backgroundActive && m_level != IOPriorityLevel::VeryLow) {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        m_backgroundActive = false;
+    }
+
     switch (m_level) {
     case IOPriorityLevel::VeryLow:
         // THREAD_MODE_BACKGROUND_BEGIN sets both CPU and IO priority to low
-        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        if (!m_backgroundActive &&
+            SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN)) {
+            m_backgroundActive = true;
+        }
         break;
     case IOPriorityLevel::Low:
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         break;
     case IOPriorityLevel::Normal:
-        // No throttling
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
         break;
     }
     m_dirCount = 0;

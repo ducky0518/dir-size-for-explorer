@@ -16,13 +16,16 @@ Windows Explorer normally leaves the Size column blank for folders. DirSize hook
 2. **IPropertyStore::GetValue** — intercepts property queries for directories and returns cached sizes from the database
 3. **IPropertyDescription::FormatForDisplay** — optionally auto-scales display formatting (KB → MB → GB) instead of Explorer's default KB-only display
 
-A background Windows service handles the actual scanning and caches results in a local SQLite database. An optional system tray app provides a settings GUI.
+The hooks are installed **only inside `explorer.exe`**. The shell DLL also gets loaded into other applications (e.g. via common file dialogs), but those processes are never patched — every other program continues to see real filesystem data.
+
+A scan engine hosted by the system tray app handles the actual scanning and caches results in a per-user SQLite database. The engine runs in your session (not as a service), so mapped network drives and your share credentials work naturally.
 
 ## Features
 
 - **Directory sizes in the Size column** — works in Details view, no extra columns needed
-- **Background scanning service** — scans on a configurable interval with low IO priority
-- **NTFS Change Journal** — efficient incremental updates when files change (no full rescan needed)
+- **Network drive support** — scans mapped drives and UNC paths with your credentials; drive letters are resolved to stable UNC paths automatically
+- **Background scanning** — interval scans with low IO priority, run from your session
+- **Real-time change watching** — `ReadDirectoryChangesW`-based watchers detect changes on any filesystem that supports change notifications (local disks, SMB shares); changed folders get a cheap single-level rescan and the size delta is propagated to parent folders instantly
 - **Size metrics** — choose between "Size" (logical) or "Size on disk" (cluster-rounded allocation)
 - **Auto-scale formatting** — optionally show sizes as KB/MB/GB instead of Explorer's KB-only default
 - **Configurable scope** — apply auto-scaling to folders only or files + folders
@@ -32,14 +35,15 @@ A background Windows service handles the actual scanning and caches results in a
 ## Installation
 
 1. Download `DirSizeForExplorer.msi` from the [latest release](https://github.com/ducky0518/dir-size-for-explorer/releases/latest)
-2. Run the installer (requires admin for service and shell extension registration)
+2. Run the installer (requires admin for shell extension registration)
 3. Explorer restarts automatically to load the extension
-4. Open **DirSize Settings** from the system tray or Start Menu to add watched directories
+4. Open **DirSize Settings** from the system tray or Start Menu to add watched directories (local folders, mapped drives, or UNC paths)
 
 ### Requirements
 
 - Windows 10 or 11 (x64)
-- NTFS volumes recommended for Change Journal support
+- No VC++ redistributable needed — binaries are statically linked
+- Real-time updates require a filesystem that supports change notifications (local disks and most SMB servers/NAS do); otherwise interval scans are used
 
 ## Configuration
 
@@ -53,8 +57,10 @@ All settings are accessible from the **DirSize Settings** tray app. Two tabs:
 |---------|---------|-------------|
 | Scan Interval | 30 min | How often to run a full scan (1–1440 minutes) |
 | IO Priority | Low | Scanner disk priority: Very Low, Low, or Normal |
-| Watched Directories | — | List of root directories to scan |
-| Use Change Journal | On | Enable NTFS USN journal for incremental updates |
+| Watched Directories | — | Root directories to scan (mapped drive letters are stored as UNC paths) |
+| Excluded Directories | — | Directories to skip entirely: not scanned and not counted in any parent's total |
+| Watch for changes | On | Real-time change watching for incremental updates |
+| Follow renames | On | When a watched folder is renamed/moved, the config and all cached sizes follow it automatically |
 
 ### Display Tab
 
@@ -66,7 +72,7 @@ All settings are accessible from the **DirSize Settings** tray app. Two tabs:
 | Column Formatting | Explorer Default | Explorer's native KB display, or auto-scaled KB/MB/GB |
 | Auto-scale Scope | Folders only | Apply auto-scaling to folders only, or files + folders |
 
-Settings are stored in the registry at `HKLM\SOFTWARE\DirSizeForExplorer` and take effect within 30 seconds (no restart needed).
+Settings are stored per user in the registry at `HKCU\SOFTWARE\DirSizeForExplorer` (machine-wide defaults installed under the same key in HKLM) and take effect within 30 seconds (no restart needed). Saving settings never requires elevation, and one user's settings cannot affect another user's scan engine.
 
 ## Architecture
 
@@ -80,44 +86,46 @@ Settings are stored in the registry at `HKLM\SOFTWARE\DirSizeForExplorer` and ta
 │  ┌─────────────────────────────────────┐             │
 │  │     DirSizeShellExt.dll (hooks)     │             │
 │  │  ┌───────────┐  ┌────────────────┐  │             │
-│  │  │ LRU Cache │  │ Format Hook    │  │             │
+│  │  │ Size Cache│  │ Format Hook    │  │             │
 │  │  │ (10k, 60s)│  │ (auto-scale)   │  │             │
 │  │  └─────┬─────┘  └────────────────┘  │             │
 │  └────────┼────────────────────────────┘             │
 └───────────┼──────────────────────────────────────────┘
-            │ read-only
-   ┌────────▼────────┐
-   │   SQLite DB      │     ┌──────────────────────┐
-   │  (dirsize.db)    │◄────│   DirSizeSvc.exe     │
-   │  ProgramData     │     │  (background service) │
-   └──────────────────┘     │                      │
-                            │  Scanner + USN Journal│
-                            └──────────────────────┘
-                                       ▲
-                            ┌──────────┤ IPC (named pipe)
-                            │          │
-                      ┌─────▼──────────┐
-                      │ DirSizeTray.exe │
-                      │ (settings GUI)  │
-                      └─────────────────┘
+            │ read-only                 ▲ IPC (named pipe,
+   ┌────────▼────────┐                  │  per session)
+   │   SQLite DB      │     ┌───────────┴──────────────┐
+   │  (dirsize.db)    │◄────│     DirSizeTray.exe      │
+   │  %LocalAppData%  │     │  (user session, at logon) │
+   └──────────────────┘     │                          │
+                            │  Settings GUI            │
+                            │  Scan engine:            │
+                            │   • interval full scans  │
+                            │   • change watchers      │
+                            │     (ReadDirectoryChanges)│
+                            └──────────────────────────┘
 ```
+
+Everything runs as the logged-on user: the shell extension inside Explorer, and the scan engine inside the tray app. That's what makes mapped network drives and per-user share credentials work without any configuration, and it means the database, cache, and IPC pipe are all naturally per-user.
 
 ### Components
 
 | Component | Description |
 |-----------|-------------|
 | **DirSizeShellExt.dll** | Shell extension loaded into Explorer — hooks APIs via Detours, reads cached sizes from SQLite |
-| **DirSizeSvc.exe** | Windows service — recursively scans watched directories, computes sizes, writes to database |
-| **DirSizeTray.exe** | System tray app — settings GUI, communicates with service via named pipe IPC |
-| **DirSizeCommon.lib** | Shared library — config, database, IPC protocol, GUIDs |
+| **DirSizeTray.exe** | Tray app hosting the scan engine (scanner, change watchers, IPC server) plus the settings GUI |
+| **DirSizeEngine.lib** | Scan engine — recursive scanner, IO throttling, directory watchers, IPC server, log buffer |
+| **DirSizeCommon.lib** | Shared library — config, database, IPC protocol, path canonicalization, GUIDs |
 
 ## Building from Source
 
 ### Prerequisites
 
-- **Visual Studio 2022** (or Build Tools) with C++ desktop workload
+- **Visual Studio 2022 or later** (or Build Tools) with C++ desktop workload
 - **CMake 3.24+**
-- **vcpkg** (for dependency management)
+- **vcpkg** — either standalone with `VCPKG_ROOT` set, or the vcpkg
+  component bundled with Visual Studio (`build-installer.cmd` finds it
+  automatically). Dependencies build against the `x64-windows-static`
+  triplet (static CRT — the MSI ships no runtime DLLs).
 
 ### Dependencies
 
@@ -132,22 +140,20 @@ Managed via `vcpkg.json`:
 git clone https://github.com/ducky0518/dir-size-for-explorer.git
 cd dir-size-for-explorer
 
-# Configure (uses CMakePresets.json — requires VCPKG_ROOT set)
-cmake --preset default
-
-# Build Release
-cmake --build build --config Release
-
-# Build MSI installer (requires WiX v4+ and .NET SDK)
+# One-time: install the WiX v4+ CLI (requires .NET SDK)
 dotnet tool install --global wix
-wix extension add WixToolset.Util.wixext
-wix extension add WixToolset.UI.wixext
-wix build installer/Product.wxs installer/Components.wxs `
-    -d BuildDir=build/shell-ext/Release `
-    -o build/DirSizeForExplorer.msi `
-    -arch x64 `
-    -ext WixToolset.Util.wixext `
-    -ext WixToolset.UI.wixext
+
+# Build Release binaries + MSI in one step:
+.\build-installer.cmd
+```
+
+The script configures CMake (requires `VCPKG_ROOT` set), builds Release,
+stages the binaries, and produces `build\DirSizeForExplorer.msi`.
+
+```powershell
+# Or manually, without the installer:
+cmake --preset default
+cmake --build build --config Release
 ```
 
 ### Build Presets
@@ -165,7 +171,7 @@ Use **Add/Remove Programs** (Settings → Apps) or run:
 msiexec /x DirSizeForExplorer.msi
 ```
 
-The installer handles COM unregistration, service removal, property schema cleanup, and Explorer restart.
+The installer handles COM unregistration, property schema cleanup, and Explorer restart. The per-user database (`%LocalAppData%\DirSizeForExplorer`) can be deleted manually if desired.
 
 ## How It's Different
 

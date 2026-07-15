@@ -18,6 +18,14 @@
 #define IDC_LBL_SCAN_INTERVAL   217
 #define IDC_LBL_IO_PRIORITY     218
 #define IDC_LBL_WATCHED_DIRS    219
+#define IDC_LBL_EXCLUDED_DIRS   220
+#define IDC_EXCLUDED_LIST       221
+#define IDC_BTN_ADD_EXCL        233
+#define IDC_BTN_REMOVE_EXCL     234
+#define IDC_CHK_TRACK_RENAMES   235
+#define IDC_LBL_DIR_INTERVAL    236
+#define IDC_DIR_INTERVAL_EDIT   237
+#define IDC_BTN_SET_INTERVAL    238
 
 // Display tab controls — Size Metric group
 #define IDC_GROUP_METRIC        222
@@ -49,6 +57,13 @@
 #define IDC_ABOUT_DESC          251
 #define IDC_ABOUT_LINK          252
 
+// Manual Scan tab controls
+#define IDC_MANUAL_LABEL        260
+#define IDC_BTN_MANUAL_SCAN     261
+#define IDC_MANUAL_STATUS       262
+#define IDC_MANUAL_HIST_LABEL   263
+#define IDC_MANUAL_HISTORY      264
+
 // Tray menu commands
 #define IDM_SETTINGS            301
 #define IDM_SCAN_NOW            302
@@ -58,6 +73,7 @@
 #define IDT_TRAY_TIMER          400
 #define IDT_LOG_POLL            401
 #define IDT_SCAN_ANIM           402
+#define IDT_MANUAL_POLL         403
 
 // Custom window message: Logging tab → main window with scanning state
 // wParam: 1 = scanning, 0 = idle

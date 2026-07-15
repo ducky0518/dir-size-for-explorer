@@ -14,6 +14,10 @@ void InstallShellHook();
 // Remove the hook (called during DLL unload).
 void RemoveShellHook();
 
+// True once hooks have been installed. While active, the DLL must not be
+// unloaded (DllCanUnloadNow returns S_FALSE; the module is also pinned).
+bool ShellHookActive();
+
 // Minimal icon overlay handler that exists solely to get our DLL
 // loaded into Explorer's process at startup. IsMemberOf always
 // returns S_FALSE so no overlay icons are ever shown.

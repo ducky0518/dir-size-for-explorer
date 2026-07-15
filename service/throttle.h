@@ -24,6 +24,7 @@ public:
 private:
     IOPriorityLevel m_level;
     DWORD m_dirCount = 0;
+    bool m_backgroundActive = false; // THREAD_MODE_BACKGROUND currently on
 };
 
 } // namespace dirsize

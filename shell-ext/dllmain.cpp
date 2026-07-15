@@ -8,12 +8,18 @@
 
 HMODULE g_hModule = nullptr;
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_hModule = hModule;
         DisableThreadLibraryCalls(hModule);
     }
-    if (reason == DLL_PROCESS_DETACH) {
+    if (reason == DLL_PROCESS_DETACH && reserved == nullptr) {
+        // Only unhook on a dynamic unload (which the module pin prevents
+        // once hooks are live — this is effectively for hook-free hosts).
+        // At process termination (reserved != NULL) other threads have
+        // already been killed mid-anything; running a Detours transaction
+        // from inside loader lock there can deadlock or crash, and the
+        // patches die with the process anyway.
         dirsize::RemoveShellHook();
     }
     return TRUE;
@@ -57,5 +63,8 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
 }
 
 STDAPI DllCanUnloadNow() {
+    // Never allow unload while Detours hooks are live — unloading would
+    // leave patched code jumping into a freed module and crash Explorer.
+    if (dirsize::ShellHookActive()) return S_FALSE;
     return (dirsize::g_dllRefCount == 0) ? S_OK : S_FALSE;
 }

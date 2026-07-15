@@ -6,8 +6,11 @@
 
 namespace dirsize {
 
-// Named pipe path for communication with the service
-inline constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\DirSizeSvc";
+// Returns the named pipe path for communication with the scan engine.
+// The engine runs per user session (hosted by the tray app), so the name
+// is scoped by session ID — multiple logged-on users each get their own
+// engine + pipe without colliding.
+std::wstring GetPipeName();
 
 // IPC command codes
 enum class IpcCommand : uint32_t {

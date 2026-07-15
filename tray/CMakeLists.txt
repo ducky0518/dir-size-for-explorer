@@ -4,8 +4,15 @@ add_executable(DirSizeTray WIN32
     resource.rc
 )
 
+# Single source of truth for the displayed version (About tab): the
+# top-level project() version. Previously hardcoded in the dialog, where
+# it silently fell out of sync with the installer version.
+target_compile_definitions(DirSizeTray PRIVATE
+    "DIRSIZE_VERSION_WSTR=L\"${PROJECT_VERSION}\"")
+
 target_link_libraries(DirSizeTray PRIVATE
     DirSizeCommon
+    DirSizeEngine
     shell32
     ole32
     comctl32

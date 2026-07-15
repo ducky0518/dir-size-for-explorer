@@ -1,6 +1,7 @@
 #include "context_menu.h"
 #include "property_handler.h"
 #include "dirsize/ipc.h"
+#include "dirsize/path_utils.h"
 
 #include <shellapi.h>
 #include <strsafe.h>
@@ -105,8 +106,9 @@ HRESULT DirSizeContextMenu::InvokeCommand(CMINVOKECOMMANDINFO* pici) {
     bool sent = SendCommand(IpcCommand::Recalculate, m_selectedPath, status);
 
     if (sent && status == IpcStatus::Ok) {
-        // Invalidate the cache so Explorer re-queries
-        SizeCache::Instance().Invalidate(m_selectedPath);
+        // Invalidate the cache so Explorer re-queries.
+        // Cache keys are canonicalized — the raw selection path would miss.
+        SizeCache::Instance().Invalidate(CanonicalizePath(m_selectedPath));
 
         // Tell Explorer to refresh this folder's parent view
         SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW,

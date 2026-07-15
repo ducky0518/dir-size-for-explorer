@@ -1,7 +1,9 @@
 #include "settings_dialog.h"
 #include "resource.h"
+#include "scanner.h" // In-process engine (real-time coverage display)
 #include "dirsize/config.h"
 #include "dirsize/ipc.h"
+#include "dirsize/path_utils.h"
 
 #include <CommCtrl.h>
 #include <ShlObj.h>
@@ -22,8 +24,92 @@ const int kScannerControls[] = {
     IDC_LBL_IO_PRIORITY, IDC_IO_PRIORITY,
     IDC_LBL_WATCHED_DIRS, IDC_WATCHED_LIST,
     IDC_BTN_ADD_DIR, IDC_BTN_REMOVE_DIR,
-    IDC_CHK_CHANGE_JOURNAL
+    IDC_LBL_DIR_INTERVAL, IDC_DIR_INTERVAL_EDIT, IDC_BTN_SET_INTERVAL,
+    IDC_LBL_EXCLUDED_DIRS, IDC_EXCLUDED_LIST,
+    IDC_BTN_ADD_EXCL, IDC_BTN_REMOVE_EXCL,
+    IDC_CHK_CHANGE_JOURNAL, IDC_CHK_TRACK_RENAMES
 };
+
+// --- Watched-directories ListView helpers -------------------------------
+
+void InitWatchedListView(HWND hDlg) {
+    HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+    ListView_SetExtendedListViewStyle(hLv, LVS_EX_FULLROWSELECT);
+
+    LVCOLUMNW col = {};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = const_cast<LPWSTR>(L"Directory");
+    col.cx = 225;
+    ListView_InsertColumn(hLv, 0, &col);
+    col.pszText = const_cast<LPWSTR>(L"Interval");
+    col.cx = 50;
+    ListView_InsertColumn(hLv, 1, &col);
+    col.pszText = const_cast<LPWSTR>(L"Real-time");
+    col.cx = 72;
+    ListView_InsertColumn(hLv, 2, &col);
+}
+
+// The authoritative interval lives in the row's lParam (item data), NOT in
+// the column text: the Interval column displays "—" while real-time
+// coverage is active (interval scans suspended), but the configured value
+// must survive for saving and as the fallback if the watcher stops.
+uint32_t GetRowInterval(HWND hLv, int row) {
+    LVITEMW item = {};
+    item.mask = LVIF_PARAM;
+    item.iItem = row;
+    ListView_GetItem(hLv, &item);
+    return static_cast<uint32_t>(item.lParam);
+}
+
+void SetRowInterval(HWND hLv, int row, uint32_t intervalMin) {
+    LVITEMW item = {};
+    item.mask = LVIF_PARAM;
+    item.iItem = row;
+    item.lParam = static_cast<LPARAM>(intervalMin);
+    ListView_SetItem(hLv, &item);
+}
+
+void AddWatchedRow(HWND hLv, const std::wstring& path, uint32_t intervalMin) {
+    LVITEMW item = {};
+    item.mask = LVIF_TEXT | LVIF_PARAM;
+    item.iItem = ListView_GetItemCount(hLv);
+    item.pszText = const_cast<LPWSTR>(path.c_str());
+    item.lParam = static_cast<LPARAM>(intervalMin);
+    int idx = ListView_InsertItem(hLv, &item);
+
+    wchar_t buf[16];
+    _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%u", intervalMin);
+    ListView_SetItemText(hLv, idx, 1, buf);
+}
+
+// Refresh the live columns from engine state:
+//   Real-time — "Active" once the watcher has processed a real change
+//               notification (which suspends interval scans for the root)
+//   Interval  — shows "—" while suspended so it's obvious which mechanism
+//               is in charge; shows the configured minutes otherwise
+void UpdateRealtimeColumn(HWND hDlg) {
+    HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+    Scanner* scanner = GetEngineScanner();
+
+    int count = ListView_GetItemCount(hLv);
+    for (int i = 0; i < count; i++) {
+        wchar_t pathBuf[1024] = {};
+        ListView_GetItemText(hLv, i, 0, pathBuf, _countof(pathBuf));
+        bool active = scanner && scanner->IsRealtimeActive(pathBuf);
+
+        ListView_SetItemText(hLv, i, 2,
+            const_cast<LPWSTR>(active ? L"Active" : L"—"));
+
+        if (active) {
+            ListView_SetItemText(hLv, i, 1, const_cast<LPWSTR>(L"—"));
+        } else {
+            wchar_t buf[16];
+            _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%u",
+                         GetRowInterval(hLv, i));
+            ListView_SetItemText(hLv, i, 1, buf);
+        }
+    }
+}
 
 // Control IDs for the display tab
 const int kDisplayControls[] = {
@@ -39,28 +125,60 @@ const int kLoggingControls[] = {
     IDC_LBL_LOG_VERBOSITY, IDC_LOG_VERBOSITY
 };
 
+// Control IDs for the manual scan tab
+const int kManualControls[] = {
+    IDC_MANUAL_LABEL, IDC_BTN_MANUAL_SCAN, IDC_MANUAL_STATUS,
+    IDC_MANUAL_HIST_LABEL, IDC_MANUAL_HISTORY
+};
+
 // Control IDs for the about tab
 const int kAboutControls[] = {
     IDC_ABOUT_TITLE, IDC_ABOUT_DESC, IDC_ABOUT_LINK
 };
 
-// Logging tab state
+// Tab indices (order of TabCtrl_InsertItem calls in WM_INITDIALOG)
+enum {
+    kTabScanner = 0,
+    kTabDisplay = 1,
+    kTabManualScan = 2,
+    kTabLogging = 3,
+    kTabAbout = 4,
+};
+
+// Logging tab state.
+// NOTE: these are file-scope statics, so they outlive the dialog. Each
+// WM_INITDIALOG must re-sync them with the (fresh, empty) controls —
+// otherwise a reopened dialog shows a blank log but keeps requesting
+// "entries newer than the last one I saw", and history never reappears.
 static uint32_t s_lastSeqNum = 0;
 static LogSeverity s_verbosityFilter = LogSeverity::Info;
 
 void ShowTabControls(HWND hDlg, int tabIndex) {
-    for (int id : kScannerControls) {
-        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 0 ? SW_SHOW : SW_HIDE);
-    }
-    for (int id : kDisplayControls) {
-        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 1 ? SW_SHOW : SW_HIDE);
-    }
-    for (int id : kLoggingControls) {
-        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 2 ? SW_SHOW : SW_HIDE);
-    }
-    for (int id : kAboutControls) {
-        ShowWindow(GetDlgItem(hDlg, id), tabIndex == 3 ? SW_SHOW : SW_HIDE);
-    }
+    // Show/hide a group; explicitly invalidate controls when shown so
+    // their content paints immediately. Without this, controls layered
+    // over the tab control could show stale/blank content until a focus
+    // click or content change forced a repaint (most visible on the
+    // Logging tab's large edit box).
+    auto showGroup = [hDlg](const int* ids, size_t count, bool visible) {
+        for (size_t i = 0; i < count; i++) {
+            HWND hCtrl = GetDlgItem(hDlg, ids[i]);
+            ShowWindow(hCtrl, visible ? SW_SHOW : SW_HIDE);
+            if (visible) {
+                InvalidateRect(hCtrl, nullptr, TRUE);
+            }
+        }
+    };
+
+    showGroup(kScannerControls, _countof(kScannerControls),
+              tabIndex == kTabScanner);
+    showGroup(kDisplayControls, _countof(kDisplayControls),
+              tabIndex == kTabDisplay);
+    showGroup(kManualControls, _countof(kManualControls),
+              tabIndex == kTabManualScan);
+    showGroup(kLoggingControls, _countof(kLoggingControls),
+              tabIndex == kTabLogging);
+    showGroup(kAboutControls, _countof(kAboutControls),
+              tabIndex == kTabAbout);
 }
 
 void LoadSettingsToDialog(HWND hDlg) {
@@ -77,15 +195,25 @@ void LoadSettingsToDialog(HWND hDlg) {
     SendMessageW(hCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Normal"));
     SendMessageW(hCombo, CB_SETCURSEL, static_cast<WPARAM>(config.ioPriority), 0);
 
-    // Watched directories
-    HWND hList = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+    // Watched directories (ListView: path, per-dir interval, real-time)
+    HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+    ListView_DeleteAllItems(hLv);
     for (const auto& dir : config.watchedDirs) {
-        SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(dir.c_str()));
+        AddWatchedRow(hLv, dir.path, dir.scanIntervalMinutes);
+    }
+    UpdateRealtimeColumn(hDlg);
+
+    // Excluded directories
+    HWND hExclList = GetDlgItem(hDlg, IDC_EXCLUDED_LIST);
+    for (const auto& dir : config.excludedDirs) {
+        SendMessageW(hExclList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(dir.c_str()));
     }
 
-    // Change journal checkbox
+    // Change watching + rename tracking checkboxes
     CheckDlgButton(hDlg, IDC_CHK_CHANGE_JOURNAL,
                    config.useChangeJournal ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(hDlg, IDC_CHK_TRACK_RENAMES,
+                   config.trackRenames ? BST_CHECKED : BST_UNCHECKED);
 
     // Size metric
     CheckRadioButton(hDlg, IDC_RADIO_LOGICAL, IDC_RADIO_ALLOC,
@@ -122,21 +250,56 @@ bool SaveSettingsFromDialog(HWND hDlg) {
     config.ioPriority = (sel >= 0 && sel <= 2)
         ? static_cast<IOPriorityLevel>(sel) : IOPriorityLevel::Low;
 
-    // Watched directories
-    HWND hList = GetDlgItem(hDlg, IDC_WATCHED_LIST);
-    int count = static_cast<int>(SendMessageW(hList, LB_GETCOUNT, 0, 0));
-    for (int i = 0; i < count; i++) {
-        int len = static_cast<int>(SendMessageW(hList, LB_GETTEXTLEN, i, 0));
-        if (len > 0) {
-            std::wstring dir(len, L'\0');
-            SendMessageW(hList, LB_GETTEXT, i, reinterpret_cast<LPARAM>(dir.data()));
-            config.watchedDirs.push_back(dir);
+    // Watched directories. Canonicalize before saving — this runs in the
+    // user's session, so mapped drive letters (H:\...) resolve to their
+    // UNC form (\\server\share\...) here. Stored UNC paths stay valid
+    // even if the letter is remapped, and match the canonical keys the
+    // scanner and shell extension use.
+    // Watched directories from the ListView (path + per-dir interval).
+    // Canonicalize before saving — this runs in the user's session, so
+    // mapped drive letters resolve to their stable UNC form here.
+    {
+        HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+        int count = ListView_GetItemCount(hLv);
+        for (int i = 0; i < count; i++) {
+            wchar_t pathBuf[1024] = {};
+            ListView_GetItemText(hLv, i, 0, pathBuf, _countof(pathBuf));
+            if (!pathBuf[0]) continue;
+
+            WatchedDir wd;
+            std::wstring canonical = CanonicalizePath(pathBuf);
+            wd.path = canonical.empty() ? pathBuf : canonical;
+
+            // Interval comes from item data, not column text — the column
+            // shows "—" while real-time coverage suspends interval scans.
+            uint32_t minutes = GetRowInterval(hLv, i);
+            wd.scanIntervalMinutes = (minutes >= 1 && minutes <= 1440)
+                ? minutes : config.scanIntervalMinutes;
+            config.watchedDirs.push_back(std::move(wd));
         }
     }
 
-    // Change journal
+    // Excluded directories from the listbox
+    {
+        HWND hList = GetDlgItem(hDlg, IDC_EXCLUDED_LIST);
+        int count = static_cast<int>(SendMessageW(hList, LB_GETCOUNT, 0, 0));
+        for (int i = 0; i < count; i++) {
+            int len = static_cast<int>(SendMessageW(hList, LB_GETTEXTLEN, i, 0));
+            if (len > 0) {
+                std::wstring dir(len, L'\0');
+                SendMessageW(hList, LB_GETTEXT, i,
+                             reinterpret_cast<LPARAM>(dir.data()));
+                std::wstring canonical = CanonicalizePath(dir);
+                config.excludedDirs.push_back(canonical.empty() ? dir : canonical);
+            }
+        }
+    }
+
+    // Change watching + rename tracking
     config.useChangeJournal =
         IsDlgButtonChecked(hDlg, IDC_CHK_CHANGE_JOURNAL) == BST_CHECKED;
+    config.trackRenames =
+        IsDlgButtonChecked(hDlg, IDC_CHK_TRACK_RENAMES) == BST_CHECKED;
 
     // Size metric
     config.sizeMetric =
@@ -166,22 +329,24 @@ bool SaveSettingsFromDialog(HWND hDlg) {
     return true;
 }
 
-void BrowseForFolder(HWND hDlg) {
+// Returns the selected folder path, or empty if cancelled.
+std::wstring BrowseForFolder(HWND hDlg, const wchar_t* title) {
     wchar_t path[MAX_PATH] = {};
 
     BROWSEINFOW bi = {};
     bi.hwndOwner = hDlg;
-    bi.lpszTitle = L"Select a directory to watch:";
+    bi.lpszTitle = title;
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
+    std::wstring result;
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
         if (SHGetPathFromIDListW(pidl, path)) {
-            HWND hList = GetDlgItem(hDlg, IDC_WATCHED_LIST);
-            SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(path));
+            result = path;
         }
         CoTaskMemFree(pidl);
     }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +387,94 @@ static std::wstring FormatFileSize(uint64_t bytes) {
         _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%llu bytes", bytes);
     }
     return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Manual Scan tab helpers
+// ---------------------------------------------------------------------------
+
+static void InitManualHistoryView(HWND hDlg) {
+    HWND hLv = GetDlgItem(hDlg, IDC_MANUAL_HISTORY);
+    ListView_SetExtendedListViewStyle(hLv, LVS_EX_FULLROWSELECT);
+
+    LVCOLUMNW col = {};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.pszText = const_cast<LPWSTR>(L"Folder");
+    col.cx = 170;
+    ListView_InsertColumn(hLv, 0, &col);
+    col.pszText = const_cast<LPWSTR>(L"Started");
+    col.cx = 62;
+    ListView_InsertColumn(hLv, 1, &col);
+    col.pszText = const_cast<LPWSTR>(L"Finished");
+    col.cx = 62;
+    ListView_InsertColumn(hLv, 2, &col);
+    col.pszText = const_cast<LPWSTR>(L"Result");
+    col.cx = 95;
+    ListView_InsertColumn(hLv, 3, &col);
+    col.pszText = const_cast<LPWSTR>(L"Watched");
+    col.cx = 60;
+    ListView_InsertColumn(hLv, 4, &col);
+}
+
+static std::wstring FormatClockTime(int64_t epochMs) {
+    if (epochMs <= 0) return L"—";
+    time_t t = static_cast<time_t>(epochMs / 1000);
+    struct tm localTm;
+    localtime_s(&localTm, &t);
+    wchar_t buf[16];
+    wcsftime(buf, _countof(buf), L"%H:%M:%S", &localTm);
+    return buf;
+}
+
+// Rebuild the history list + status line from the engine's live state.
+static void RefreshManualTab(HWND hDlg) {
+    Scanner* scanner = GetEngineScanner();
+    HWND hLv = GetDlgItem(hDlg, IDC_MANUAL_HISTORY);
+    ListView_DeleteAllItems(hLv);
+
+    if (!scanner) {
+        SetDlgItemTextW(hDlg, IDC_MANUAL_STATUS, L"Engine not running");
+        return;
+    }
+
+    bool anyActive = false;
+    auto history = scanner->GetManualScanHistory();
+    for (const auto& rec : history) {
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = ListView_GetItemCount(hLv);
+        item.pszText = const_cast<LPWSTR>(rec.path.c_str());
+        int idx = ListView_InsertItem(hLv, &item);
+
+        ListView_SetItemText(hLv, idx, 1,
+            const_cast<LPWSTR>(FormatClockTime(rec.startMs).c_str()));
+        ListView_SetItemText(hLv, idx, 2,
+            const_cast<LPWSTR>(FormatClockTime(rec.endMs).c_str()));
+
+        std::wstring resultText;
+        if (rec.endMs == 0) {
+            resultText = (rec.startMs == 0) ? L"Queued" : L"Scanning…";
+            anyActive = true;
+        } else if (!rec.completed) {
+            resultText = L"Aborted";
+        } else {
+            wchar_t buf[96];
+            _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%s, %llu files",
+                         FormatFileSize(rec.totalSize).c_str(), rec.fileCount);
+            resultText = buf;
+        }
+        ListView_SetItemText(hLv, idx, 3,
+            const_cast<LPWSTR>(resultText.c_str()));
+
+        // Is this folder covered by a configured watched directory
+        // ("full scanner"), or was this a standalone one-off scan?
+        ListView_SetItemText(hLv, idx, 4,
+            const_cast<LPWSTR>(rec.underWatched ? L"Yes" : L"No"));
+    }
+
+    SetDlgItemTextW(hDlg, IDC_MANUAL_STATUS,
+        anyActive ? L"Scan in progress…"
+                  : L"Idle — pick a folder to scan it now.");
 }
 
 static void RefreshLog(HWND hDlg) {
@@ -275,13 +528,23 @@ static void RefreshLog(HWND hDlg) {
             currentPath.c_str(), statusInfo.dbEntryCount,
             FormatFileSize(statusInfo.dbSizeBytes).c_str());
     } else {
-        // Format last scan time
-        wchar_t timeStr[32] = L"Never";
+        // Format last scan time. Include the date when it isn't today —
+        // with baseline reuse the last scan can be days old, and a bare
+        // "4:48 AM" would be misleading.
+        wchar_t timeStr[48] = L"Never";
         if (statusInfo.lastScanTimestamp > 0) {
             time_t t = static_cast<time_t>(statusInfo.lastScanTimestamp / 1000);
             struct tm localTm;
             localtime_s(&localTm, &t);
-            wcsftime(timeStr, _countof(timeStr), L"%I:%M %p", &localTm);
+
+            time_t nowT = time(nullptr);
+            struct tm nowTm;
+            localtime_s(&nowTm, &nowT);
+
+            bool sameDay = localTm.tm_year == nowTm.tm_year &&
+                           localTm.tm_yday == nowTm.tm_yday;
+            wcsftime(timeStr, _countof(timeStr),
+                     sameDay ? L"%I:%M %p" : L"%m/%d %I:%M %p", &localTm);
         }
         _snwprintf_s(statusText, _countof(statusText), _TRUNCATE,
             L"Status: Idle | DB: %llu entries (%s) | Last scan: %s",
@@ -356,25 +619,41 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
     case WM_INITDIALOG: {
         // Set up tab control
         HWND hTab = GetDlgItem(hDlg, IDC_TAB_CONTROL);
+
+        // CRITICAL: push the tab control to the BOTTOM of the sibling
+        // z-order. The tab-page controls are siblings layered over its
+        // display area; if the tab sits above them, its repaint on every
+        // selection change paints over their content (symptom: blank log
+        // box until clicked). WS_CLIPSIBLINGS only clips siblings that are
+        // ABOVE the tab, so the z-order must put the content on top.
+        SetWindowPos(hTab, HWND_BOTTOM, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
         TCITEMW tie = {};
         tie.mask = TCIF_TEXT;
 
         tie.pszText = const_cast<LPWSTR>(L"Scanner");
-        TabCtrl_InsertItem(hTab, 0, &tie);
+        TabCtrl_InsertItem(hTab, kTabScanner, &tie);
 
         tie.pszText = const_cast<LPWSTR>(L"Display");
-        TabCtrl_InsertItem(hTab, 1, &tie);
+        TabCtrl_InsertItem(hTab, kTabDisplay, &tie);
+
+        tie.pszText = const_cast<LPWSTR>(L"Manual Scan");
+        TabCtrl_InsertItem(hTab, kTabManualScan, &tie);
 
         tie.pszText = const_cast<LPWSTR>(L"Logging");
-        TabCtrl_InsertItem(hTab, 2, &tie);
+        TabCtrl_InsertItem(hTab, kTabLogging, &tie);
 
         tie.pszText = const_cast<LPWSTR>(L"About");
-        TabCtrl_InsertItem(hTab, 3, &tie);
+        TabCtrl_InsertItem(hTab, kTabAbout, &tie);
 
+        InitWatchedListView(hDlg);
+        InitManualHistoryView(hDlg);
         LoadSettingsToDialog(hDlg);
 
         // Initialize About tab controls
-        SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE, L"DirSize for Explorer  v1.1");
+        SetDlgItemTextW(hDlg, IDC_ABOUT_TITLE,
+                        L"DirSize for Explorer  v" DIRSIZE_VERSION_WSTR);
         SetDlgItemTextW(hDlg, IDC_ABOUT_DESC,
             L"DirSize for Explorer brings folder sizes to Windows Explorer \x2014 "
             L"filling in the Size column for directories, just like it already does for individual files. "
@@ -393,7 +672,16 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
                      reinterpret_cast<LPARAM>(L"Normal"));
         SendMessageW(hVerbosity, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(L"Verbose"));
-        SendMessageW(hVerbosity, CB_SETCURSEL, 1, 0);  // Default: Normal
+        // Combo indices match LogSeverity values (Error=0, Info=1,
+        // Verbose=2). Select the persisted filter so the UI reflects the
+        // filter actually in effect after a dialog reopen.
+        SendMessageW(hVerbosity, CB_SETCURSEL,
+                     static_cast<WPARAM>(s_verbosityFilter), 0);
+
+        // The edit control starts empty in this new dialog instance, so
+        // request the full history on the first refresh — this is what
+        // makes historical entries appear without waiting for a new one.
+        s_lastSeqNum = 0;
 
         // Set edit control text limit
         SendDlgItemMessageW(hDlg, IDC_LOG_EDIT, EM_SETLIMITTEXT, 256 * 1024, 0);
@@ -410,13 +698,33 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
             int tabIndex = TabCtrl_GetCurSel(GetDlgItem(hDlg, IDC_TAB_CONTROL));
             ShowTabControls(hDlg, tabIndex);
 
-            if (tabIndex == 2) {
+            if (tabIndex == kTabLogging) {
                 // Start polling and do an immediate refresh
                 SetTimer(hDlg, IDT_LOG_POLL, 2000, nullptr);
                 RefreshLog(hDlg);
             } else {
                 KillTimer(hDlg, IDT_LOG_POLL);
             }
+            if (tabIndex == kTabManualScan) {
+                // Poll while visible so running scans tick over to
+                // completed without user interaction
+                SetTimer(hDlg, IDT_MANUAL_POLL, 1000, nullptr);
+                RefreshManualTab(hDlg);
+            } else {
+                KillTimer(hDlg, IDT_MANUAL_POLL);
+            }
+            if (tabIndex == kTabScanner) {
+                // Returning to the Scanner tab: refresh the live
+                // "Real-time" coverage column
+                UpdateRealtimeColumn(hDlg);
+            }
+
+            // Synchronous repaint of the whole page after the switch —
+            // with the tab control at the bottom of the z-order this
+            // guarantees the newly shown controls end up painted last.
+            RedrawWindow(hDlg, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN |
+                         RDW_UPDATENOW);
         }
 
         // About tab hyperlink click
@@ -433,6 +741,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
     case WM_TIMER:
         if (wParam == IDT_LOG_POLL) {
             RefreshLog(hDlg);
+        } else if (wParam == IDT_MANUAL_POLL) {
+            RefreshManualTab(hDlg);
         }
         return TRUE;
 
@@ -441,17 +751,22 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
         case IDC_BTN_OK:
             if (SaveSettingsFromDialog(hDlg)) {
                 KillTimer(hDlg, IDT_LOG_POLL);
+                KillTimer(hDlg, IDT_MANUAL_POLL);
                 DestroyWindow(hDlg);
             }
             return TRUE;
 
         case IDC_BTN_CANCEL:
             KillTimer(hDlg, IDT_LOG_POLL);
+            KillTimer(hDlg, IDT_MANUAL_POLL);
             DestroyWindow(hDlg);
             return TRUE;
 
         case IDC_BTN_APPLY:
             SaveSettingsFromDialog(hDlg);
+            // Watchers restart on save; coverage re-confirms on the next
+            // real change, so reflect the current state now.
+            UpdateRealtimeColumn(hDlg);
             return TRUE;
 
         case IDC_RADIO_FMT_DEFAULT:
@@ -462,22 +777,103 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
             return TRUE;
         }
 
-        case IDC_BTN_ADD_DIR:
-            BrowseForFolder(hDlg);
-            return TRUE;
-
-        case IDC_BTN_REMOVE_DIR: {
-            HWND hList = GetDlgItem(hDlg, IDC_WATCHED_LIST);
-            int sel = static_cast<int>(SendMessageW(hList, LB_GETCURSEL, 0, 0));
-            if (sel != LB_ERR) {
-                SendMessageW(hList, LB_DELETESTRING, sel, 0);
+        case IDC_BTN_ADD_DIR: {
+            std::wstring dir = BrowseForFolder(hDlg,
+                L"Select a directory to watch:");
+            if (!dir.empty()) {
+                // New rows start with the default interval from the field
+                BOOL translated = FALSE;
+                UINT defMin = GetDlgItemInt(hDlg, IDC_SCAN_INTERVAL,
+                                            &translated, FALSE);
+                if (!translated || defMin < 1 || defMin > 1440) defMin = 30;
+                AddWatchedRow(GetDlgItem(hDlg, IDC_WATCHED_LIST), dir, defMin);
+                UpdateRealtimeColumn(hDlg);
             }
             return TRUE;
         }
 
+        case IDC_BTN_MANUAL_SCAN: {
+            std::wstring dir = BrowseForFolder(hDlg,
+                L"Select a folder to scan now:");
+            if (!dir.empty()) {
+                if (Scanner* scanner = GetEngineScanner()) {
+                    scanner->RequestManualScan(dir);
+                } else {
+                    MessageBoxW(hDlg, L"The scan engine is not running.",
+                                L"DirSize", MB_OK | MB_ICONWARNING);
+                }
+                RefreshManualTab(hDlg);
+            }
+            return TRUE;
+        }
+
+        case IDC_BTN_ADD_EXCL: {
+            std::wstring dir = BrowseForFolder(hDlg,
+                L"Select a directory to exclude from scanning:");
+            if (!dir.empty()) {
+                SendMessageW(GetDlgItem(hDlg, IDC_EXCLUDED_LIST),
+                             LB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(dir.c_str()));
+            }
+            return TRUE;
+        }
+
+        case IDC_BTN_REMOVE_DIR: {
+            // Remove ALL selected rows (multi-select), highest index first
+            HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+            std::vector<int> selected;
+            int i = -1;
+            while ((i = ListView_GetNextItem(hLv, i, LVNI_SELECTED)) != -1) {
+                selected.push_back(i);
+            }
+            for (auto it = selected.rbegin(); it != selected.rend(); ++it) {
+                ListView_DeleteItem(hLv, *it);
+            }
+            return TRUE;
+        }
+
+        case IDC_BTN_REMOVE_EXCL: {
+            // Remove ALL selected entries (extended-select listbox)
+            HWND hList = GetDlgItem(hDlg, IDC_EXCLUDED_LIST);
+            int selCount = static_cast<int>(
+                SendMessageW(hList, LB_GETSELCOUNT, 0, 0));
+            if (selCount > 0) {
+                std::vector<int> items(selCount);
+                SendMessageW(hList, LB_GETSELITEMS, selCount,
+                             reinterpret_cast<LPARAM>(items.data()));
+                for (auto it = items.rbegin(); it != items.rend(); ++it) {
+                    SendMessageW(hList, LB_DELETESTRING, *it, 0);
+                }
+            }
+            return TRUE;
+        }
+
+        case IDC_BTN_SET_INTERVAL: {
+            // Apply the interval in the edit box to all selected rows
+            BOOL translated = FALSE;
+            UINT minutes = GetDlgItemInt(hDlg, IDC_DIR_INTERVAL_EDIT,
+                                         &translated, FALSE);
+            if (!translated || minutes < 1 || minutes > 1440) {
+                MessageBoxW(hDlg, L"Enter an interval between 1 and 1440 minutes.",
+                            L"DirSize", MB_OK | MB_ICONINFORMATION);
+                return TRUE;
+            }
+            HWND hLv = GetDlgItem(hDlg, IDC_WATCHED_LIST);
+            int i = -1;
+            while ((i = ListView_GetNextItem(hLv, i, LVNI_SELECTED)) != -1) {
+                SetRowInterval(hLv, i, minutes);
+            }
+            // Re-render the Interval column (respects the "—" display
+            // for rows with active real-time coverage)
+            UpdateRealtimeColumn(hDlg);
+            return TRUE;
+        }
+
         case IDC_BTN_LOG_CLEAR:
+            // Clear the display only. Deliberately do NOT reset
+            // s_lastSeqNum — resetting it made the next 2s poll refetch
+            // the entire history, "un-clearing" the log immediately.
             SetDlgItemTextW(hDlg, IDC_LOG_EDIT, L"");
-            s_lastSeqNum = 0;
             return TRUE;
 
         case IDC_BTN_LOG_COPY: {
@@ -505,6 +901,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message,
 
     case WM_CLOSE:
         KillTimer(hDlg, IDT_LOG_POLL);
+        KillTimer(hDlg, IDT_MANUAL_POLL);
         DestroyWindow(hDlg);
         return TRUE;
     }

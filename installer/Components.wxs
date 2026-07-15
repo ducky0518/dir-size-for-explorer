@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <Fragment>
     <!-- Core shell extension files -->
@@ -31,11 +30,13 @@
           <RegistryValue Name="ThreadingModel" Type="string" Value="Apartment" />
         </RegistryKey>
 
-        <!-- Register property handler for Directory shell object -->
-        <RegistryKey Root="HKCR" Key="Directory\ShellEx\PropertyHandler">
-          <RegistryValue Type="string"
-              Value="{A1C3E5F7-2B4D-6E8F-9A0B-C1D2E3F4A5B6}" />
-        </RegistryKey>
+        <!-- NOTE: the Directory\ShellEx\PropertyHandler default value is
+             deliberately NOT declared here. It is a machine-wide singleton
+             that another product may already own; DllRegisterServer (run
+             via the RegisterPropertySchema custom action) writes it after
+             saving any pre-existing handler, and DllUnregisterServer
+             restores that handler on uninstall. Declaring it as an MSI
+             registry value would blindly delete it on uninstall. -->
 
         <!-- Register context menu for Directory -->
         <RegistryKey Root="HKCR"
@@ -88,47 +89,23 @@
               KeyPath="yes" />
       </Component>
 
-      <!-- SQLite3 runtime -->
-      <Component Id="Sqlite3Dll" Guid="1A2B3C4D-5E6F-7A8B-9C0D-1E2F3A4B5C6D">
-        <File Id="sqlite3.dll" Source="$(var.BuildDir)\sqlite3.dll"
-              KeyPath="yes" />
-      </Component>
+      <!-- Note: sqlite3 and the C runtime are statically linked into the
+           binaries (x64-windows-static + /MT) — no runtime DLLs shipped,
+           no VC++ redistributable required on clean machines. -->
     </ComponentGroup>
   </Fragment>
 
-  <Fragment>
-    <!-- Service executable -->
-    <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
-      <Component Id="ServiceExe" Guid="B3C4D5E6-F7A8-9B0C-1D2E-3F4A5B6C7D8E">
-        <File Id="DirSizeSvc.exe" Source="$(var.BuildDir)\DirSizeSvc.exe"
-              KeyPath="yes" />
-        <ServiceInstall Id="DirSizeSvcInstall"
-                        Name="DirSizeSvc"
-                        DisplayName="Directory Size Scanner"
-                        Description="Calculates and caches directory sizes for the Explorer Total Size column."
-                        Type="ownProcess"
-                        Start="auto"
-                        ErrorControl="normal"
-                        Account="LocalSystem" />
-        <ServiceControl Id="DirSizeSvcControl"
-                        Name="DirSizeSvc"
-                        Start="install"
-                        Stop="both"
-                        Remove="uninstall"
-                        Wait="yes" />
-        <!-- Recovery actions: restart after 60s, 120s, then 300s -->
-        <util:ServiceConfig ServiceName="DirSizeSvc"
-            FirstFailureActionType="restart"
-            SecondFailureActionType="restart"
-            ThirdFailureActionType="restart"
-            RestartServiceDelayInSeconds="60"
-            ResetPeriodInDays="1" />
-      </Component>
-    </ComponentGroup>
-  </Fragment>
+  <!-- NOTE: the Windows service (DirSizeSvc.exe) was removed. The scan
+       engine is now hosted by DirSizeTray.exe in the user's session so
+       that mapped network drives and the user's share credentials work.
+       The tray app auto-starts at logon via the Run key below. -->
 
   <Fragment>
-    <!-- Default configuration in the registry -->
+    <!-- Machine-wide DEFAULT configuration. Read-only for standard users:
+         actual settings live per user under HKCU (written by the tray
+         app without elevation). Do NOT grant Users write access here —
+         a writable HKLM config would let any local user repoint every
+         other user's scan engine (e.g. at a hostile UNC path). -->
     <ComponentGroup Id="RegistryComponents" Directory="INSTALLFOLDER">
       <Component Id="DefaultConfig" Guid="C4D5E6F7-A8B9-0C1D-2E3F-4A5B6C7D8E9F">
         <RegistryKey Root="HKLM" Key="SOFTWARE\DirSizeForExplorer"
@@ -139,16 +116,12 @@
           <RegistryValue Name="SizeMetric" Type="integer" Value="0" />
           <RegistryValue Name="IOPriority" Type="integer" Value="1" />
           <RegistryValue Name="UseChangeJournal" Type="integer" Value="1" />
-          <!-- Allow non-admin users to modify settings via the tray app -->
-          <util:PermissionEx User="Users" GenericRead="yes" GenericWrite="yes" />
         </RegistryKey>
       </Component>
 
-      <!-- Data directory -->
-      <Component Id="DataDir" Guid="D5E6F7A8-B9C0-1D2E-3F4A-5B6C7D8E9FA0"
-                 Directory="DATAFOLDER">
-        <CreateFolder />
-      </Component>
+      <!-- Note: the size database is per-user (%LocalAppData%\DirSizeForExplorer),
+           created on first run by the engine — no shared data folder or
+           special ACLs are needed anymore. -->
     </ComponentGroup>
   </Fragment>
 

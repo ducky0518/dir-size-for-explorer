@@ -1,6 +1,15 @@
 #include "resource.h"
 #include "settings_dialog.h"
 #include "dirsize/ipc.h"
+#include "dirsize/config.h"
+#include "dirsize/db.h"
+#include "dirsize/path_utils.h"
+
+// Scan engine (hosted in-process — see service/CMakeLists.txt for why)
+#include "scanner.h"
+#include "ipc_server.h"
+#include "dir_watcher.h"
+#include "log_buffer.h"
 
 #include <Windows.h>
 #include <shellapi.h>
@@ -13,6 +22,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <set>
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
@@ -39,6 +51,104 @@ int      g_animFrame = 0;
 bool     g_isScanning = false;
 int      g_pollFailures = 0;       // consecutive failed polls
 UINT     g_wmTaskbarCreated = 0;   // registered "TaskbarCreated" message
+
+// --- In-process scan engine ---
+HANDLE   g_engineStopEvent = nullptr;
+std::shared_ptr<dirsize::Database> g_engineDb;
+std::unique_ptr<dirsize::Scanner> g_scanner;
+std::unique_ptr<dirsize::IpcServer> g_ipcServer;
+std::vector<std::unique_ptr<dirsize::DirectoryWatcher>> g_watchers;
+std::mutex g_watchersMutex;
+
+// Reconcile the directory watchers with the current configuration.
+// Called at startup and whenever settings are saved (via the IPC server's
+// reload callback), so edits to the watched-dir list apply immediately.
+//
+// IMPORTANT: this DIFFS rather than restarts. Watchers for unchanged roots
+// keep running — stopping them would clear their confirmed real-time
+// state, which made every settings Apply flip "Real-time" back to "—"
+// (and resume interval scans) until the next actual file change.
+void RestartWatchers() {
+    std::lock_guard lock(g_watchersMutex);
+
+    dirsize::Config config = dirsize::LoadConfig();
+
+    // Desired set of canonical roots
+    std::set<std::wstring> desired;
+    if (config.useChangeJournal && g_scanner) {
+        for (const auto& dir : config.watchedDirs) {
+            std::wstring canon = dirsize::CanonicalizePath(dir.path);
+            if (!canon.empty()) desired.insert(std::move(canon));
+        }
+    }
+
+    // Keep watchers whose root is still wanted; stop the rest.
+    for (auto it = g_watchers.begin(); it != g_watchers.end();) {
+        if (desired.erase((*it)->Root()) > 0) {
+            ++it; // Still wanted — leave it running (state preserved)
+        } else {
+            (*it)->Stop();
+            it = g_watchers.erase(it);
+        }
+    }
+
+    // Start watchers for newly added roots.
+    for (const auto& root : desired) {
+        auto watcher = std::make_unique<dirsize::DirectoryWatcher>(*g_scanner);
+        if (watcher->Start(root, g_engineStopEvent)) {
+            g_watchers.push_back(std::move(watcher));
+        }
+        // On failure the watcher already logged; interval scans cover it.
+    }
+}
+
+bool StartEngine() {
+    g_engineStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_engineStopEvent) return false;
+
+    g_engineDb = std::make_shared<dirsize::Database>();
+    if (!g_engineDb->Open(dirsize::Database::GetDefaultPath(), false)) {
+        dirsize::Log(dirsize::LogSeverity::Error, "Failed to open database");
+        return false;
+    }
+
+    dirsize::Config config = dirsize::LoadConfig();
+
+    g_scanner = std::make_unique<dirsize::Scanner>(g_engineDb, config);
+    g_scanner->Start(g_engineStopEvent);
+
+    g_ipcServer = std::make_unique<dirsize::IpcServer>(g_engineDb);
+    g_ipcServer->SetScanner(g_scanner.get());
+    g_ipcServer->SetReloadCallback(RestartWatchers);
+    g_ipcServer->Start();
+
+    RestartWatchers();
+
+    dirsize::Log(dirsize::LogSeverity::Info,
+        "Engine started — %d watched dirs, change watching %s",
+        static_cast<int>(config.watchedDirs.size()),
+        config.useChangeJournal ? "on" : "off");
+    return true;
+}
+
+void StopEngine() {
+    if (g_engineStopEvent) SetEvent(g_engineStopEvent);
+    {
+        std::lock_guard lock(g_watchersMutex);
+        for (auto& w : g_watchers) w->Stop();
+        g_watchers.clear();
+    }
+    if (g_scanner) g_scanner->Stop();
+    if (g_ipcServer) g_ipcServer->Stop();
+    g_scanner.reset();
+    g_ipcServer.reset();
+    if (g_engineDb) g_engineDb->Close();
+    g_engineDb.reset();
+    if (g_engineStopEvent) {
+        CloseHandle(g_engineStopEvent);
+        g_engineStopEvent = nullptr;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Detect whether the current process is running elevated (admin).
@@ -258,23 +368,11 @@ void SetScanningState(bool scanning) {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback polling via lightweight GetStatus IPC — runs every 3 s.
-// When the Logging tab is open it sends WM_SCAN_STATE directly, so
-// this timer mainly covers the case where the settings dialog is closed.
+// The scanner runs in-process now, so scanning state is a direct query —
+// no IPC, no timeouts, no background pipe traffic.
 // ---------------------------------------------------------------------------
 void PollScanStatus() {
-    dirsize::IpcStatus status;
-    bool ok = dirsize::SendCommand(
-        dirsize::IpcCommand::GetStatus, status, 2000);
-
-    if (ok) {
-        g_pollFailures = 0;
-        SetScanningState(status == dirsize::IpcStatus::Busy);
-    } else {
-        g_pollFailures++;
-        if (g_pollFailures >= 3)
-            SetScanningState(false);   // service unreachable — assume idle
-    }
+    SetScanningState(g_scanner && g_scanner->IsScanning());
 }
 
 void AdvanceAnimFrame() {
@@ -344,13 +442,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             return 0;
 
-        case IDM_SCAN_NOW: {
-            dirsize::IpcStatus status;
-            dirsize::SendCommand(dirsize::IpcCommand::ScanNow, status);
+        case IDM_SCAN_NOW:
+            if (g_scanner) g_scanner->RequestFullScan();
             // Poll immediately so animation starts without waiting for timer
             PollScanStatus();
             return 0;
-        }
 
         case IDM_EXIT:
             RemoveTrayIcon();
@@ -388,6 +484,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
 } // namespace
 
+namespace dirsize {
+// Direct access to the in-process scanner for the settings dialog
+// (e.g. the "Real-time" column). May be null before StartEngine().
+Scanner* GetEngineScanner() {
+    return g_scanner.get();
+}
+} // namespace dirsize
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
                     LPWSTR /*lpCmdLine*/, int /*nCmdShow*/) {
     g_hInstance = hInstance;
@@ -395,7 +499,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     // Initialize common controls
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(icex);
-    icex.dwICC = ICC_TAB_CLASSES | ICC_UPDOWN_CLASS;
+    icex.dwICC = ICC_TAB_CLASSES | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&icex);
 
     // Initialize COM (needed for SHBrowseForFolder and shell broker)
@@ -407,6 +511,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
         wchar_t exePath[MAX_PATH];
         GetModuleFileNameW(nullptr, exePath, MAX_PATH);
         LaunchNonElevated(exePath);
+        CoUninitialize();
+        return 0;
+    }
+
+    // Single instance per session — the app hosts the scan engine and the
+    // IPC pipe, so a second copy would fight over both.
+    HANDLE hInstanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\DirSizeTray");
+    if (!hInstanceMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hInstanceMutex) CloseHandle(hInstanceMutex);
         CoUninitialize();
         return 0;
     }
@@ -433,11 +546,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
     // Register for Explorer restart notifications
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
+    // Start the in-process scan engine (scanner, IPC server, watchers).
+    // Runs in this user session, so mapped network drives and the user's
+    // share credentials work naturally.
+    StartEngine();
+
     CreateAnimationFrames();
     AddTrayIcon(g_hWnd);
 
-    // Poll service scanning status every 3 seconds
-    SetTimer(g_hWnd, IDT_TRAY_TIMER, 3000, nullptr);
+    // Poll service scanning status every 10 seconds. The Logging tab
+    // pushes authoritative state every 2 s while open, so this timer is
+    // only a low-cost fallback — keep it infrequent to avoid constant
+    // background pipe traffic.
+    SetTimer(g_hWnd, IDT_TRAY_TIMER, 10000, nullptr);
 
     // Message loop
     MSG msg;
@@ -451,6 +572,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/,
         DispatchMessageW(&msg);
     }
 
+    StopEngine();
+    CloseHandle(hInstanceMutex);
     CoUninitialize();
     return static_cast<int>(msg.wParam);
 }

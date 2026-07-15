@@ -1,4 +1,5 @@
 #include "dirsize/db.h"
+#include "dirsize/path_utils.h"
 
 #include <Windows.h>
 
@@ -100,6 +101,43 @@ void TestPathNormalization() {
     size = db.GetSize(L"C:/Users/Test");
     assert(size.has_value());
     assert(*size == 999);
+
+    db.Close();
+    CleanupDb(path);
+    std::wcout << L"PASSED" << std::endl;
+}
+
+void TestLongPathPrefixNormalization() {
+    std::wcout << L"TestLongPathPrefixNormalization... ";
+    auto path = GetTempDbPath();
+    CleanupDb(path);
+
+    Database db;
+    assert(db.Open(path, false));
+
+    DirEntry local;
+    local.path = L"C:\\Users\\Test\\Docs";
+    local.totalSize = 321;
+    local.scanTime = 1700000000;
+    assert(db.UpsertEntry(local));
+
+    auto size = db.GetSize(L"\\\\?\\C:\\Users\\Test\\Docs\\");
+    assert(size.has_value());
+    assert(*size == 321);
+
+    DirEntry unc;
+    unc.path = L"\\\\TRUENAS\\storage\\Adult";
+    unc.totalSize = 654;
+    unc.scanTime = 1700000001;
+    assert(db.UpsertEntry(unc));
+
+    size = db.GetSize(L"\\\\?\\UNC\\TRUENAS\\storage\\Adult\\");
+    assert(size.has_value());
+    assert(*size == 654);
+
+    assert(CanonicalizePath(L"\\\\?\\UNC\\TRUENAS\\Storage\\Adult\\") ==
+           L"\\\\truenas\\storage\\adult");
+    assert(CanonicalizePath(L"\\\\?\\C:\\Temp\\") == L"c:\\temp");
 
     db.Close();
     CleanupDb(path);
@@ -217,6 +255,61 @@ void TestRemoveByPrefix() {
     std::wcout << L"PASSED" << std::endl;
 }
 
+// Regression: paths read back from SQLite used to carry an embedded
+// terminating NUL (Utf8ToWide with len=-1). Re-upserting such an entry
+// (the ancestor-delta path) created a distinct ghost row under "path\0"
+// while the real row went stale, and RemoveByPrefix on a path returned by
+// GetChildDirs silently deleted nothing.
+void TestNoEmbeddedNulInReadPaths() {
+    std::wcout << L"TestNoEmbeddedNulInReadPaths... ";
+    auto path = GetTempDbPath();
+    CleanupDb(path);
+
+    Database db;
+    bool opened = db.Open(path, false);
+    assert(opened);
+
+    DirEntry parent;
+    parent.path = L"C:\\P";
+    parent.totalSize = 100;
+    parent.scanTime = 1700000000;
+    parent.depth = 1;
+    DirEntry child;
+    child.path = L"C:\\P\\Child";
+    child.totalSize = 40;
+    child.scanTime = 1700000000;
+    child.depth = 2;
+    bool wrote = db.UpsertEntry(parent) && db.UpsertEntry(child);
+    assert(wrote);
+
+    // Read-back path must be clean (no embedded NUL, canonical form)
+    auto entry = db.GetEntry(L"C:\\P");
+    assert(entry.has_value());
+    assert(entry->path.find(L'\0') == std::wstring::npos);
+    assert(entry->path == L"c:\\p");
+
+    // Re-upserting a read-back entry must UPDATE the same row, not
+    // create a ghost row under a NUL-suffixed key
+    entry->totalSize = 150;
+    wrote = db.UpsertEntry(*entry);
+    assert(wrote);
+    assert(db.GetEntryCount() == 2);
+    auto size = db.GetSize(L"C:\\P");
+    assert(size.has_value() && *size == 150);
+
+    // A path returned by GetChildDirs must be usable for removal
+    auto children = db.GetChildDirs(L"C:\\P", 1);
+    assert(children.size() == 1);
+    assert(children[0].find(L'\0') == std::wstring::npos);
+    bool removed = db.RemoveByPrefix(children[0]);
+    assert(removed);
+    assert(!db.GetSize(L"C:\\P\\Child").has_value());
+
+    db.Close();
+    CleanupDb(path);
+    std::wcout << L"PASSED" << std::endl;
+}
+
 void TestUsnBookmark() {
     std::wcout << L"TestUsnBookmark... ";
     auto path = GetTempDbPath();
@@ -286,10 +379,12 @@ int main() {
     TestOpenClose();
     TestUpsertAndGet();
     TestPathNormalization();
+    TestLongPathPrefixNormalization();
     TestBatchUpsert();
     TestUpdateExisting();
     TestNotFound();
     TestRemoveByPrefix();
+    TestNoEmbeddedNulInReadPaths();
     TestUsnBookmark();
     TestReadOnlyMode();
 

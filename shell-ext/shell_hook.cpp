@@ -2,6 +2,7 @@
 #include "property_handler.h"
 #include "dirsize/config.h"
 #include "dirsize/guids.h"
+#include "dirsize/path_utils.h"
 
 #include <detours/detours.h>
 #include <ShlObj.h>
@@ -25,7 +26,12 @@ static FILE* OpenLog() {
     static FILE* f = nullptr;
     static std::once_flag logOnce;
     std::call_once(logOnce, [] {
-        f = _wfopen(L"C:\\ProgramData\\DirSizeForExplorer\\hook_debug.log", L"w");
+        // Next to the per-user database (%LocalAppData%\DirSizeForExplorer)
+        std::wstring path = Database::GetDefaultPath();
+        size_t sep = path.find_last_of(L'\\');
+        if (sep == std::wstring::npos) return;
+        path = path.substr(0, sep + 1) + L"hook_debug.log";
+        f = _wfopen(path.c_str(), L"w");
     });
     return f;
 }
@@ -44,22 +50,10 @@ static void DebugLog(const char* fmt, ...) {
 // Shared DB / cache access
 // ---------------------------------------------------------------------------
 
+// Shared with the property handler — retries the open if the service
+// hasn't created the database yet (see property_handler.cpp).
 static Database& GetHookDb() {
-    static Database db;
-    static std::once_flag initFlag;
-    std::call_once(initFlag, [] {
-        db.Open(Database::GetDefaultPath(), true /* readOnly */);
-    });
-    return db;
-}
-
-static std::wstring NormalizePath(const wchar_t* path) {
-    std::wstring result(path);
-    std::replace(result.begin(), result.end(), L'/', L'\\');
-    while (result.size() > 3 && result.back() == L'\\')
-        result.pop_back();
-    std::transform(result.begin(), result.end(), result.begin(), ::towlower);
-    return result;
+    return GetReadOnlyDb();
 }
 
 // ---------------------------------------------------------------------------
@@ -103,24 +97,27 @@ static bool GetAutoScaleFoldersOnly() {
 }
 
 static std::optional<uint64_t> LookupDirSize(const std::wstring& fullPath) {
-    std::wstring normalized = NormalizePath(fullPath.c_str());
+    std::wstring normalized = CanonicalizePath(fullPath);
     SizeMetric metric = GetCurrentSizeMetric();
 
-    if (metric == SizeMetric::AllocationSize) {
-        auto cached = SizeCache::Instance().GetAlloc(normalized);
-        if (cached) return *cached;
-    } else {
-        auto cached = SizeCache::Instance().Get(normalized);
-        if (cached) return *cached;
+    // In-memory cache first — positive AND negative hits. Negative caching
+    // matters: without it, every Explorer refresh of an unscanned folder
+    // re-queried SQLite once per directory entry.
+    if (auto cached = SizeCache::Instance().Lookup(normalized)) {
+        if (!cached->found) return std::nullopt;
+        return (metric == SizeMetric::AllocationSize) ? cached->allocSize
+                                                      : cached->size;
     }
 
     auto& db = GetHookDb();
-    auto entry = db.GetEntry(normalized);
-    if (entry) {
+    if (!db.IsOpen()) return std::nullopt;
+
+    if (auto entry = db.GetEntry(normalized)) {
         SizeCache::Instance().Put(normalized, entry->totalSize, entry->allocSize);
         return (metric == SizeMetric::AllocationSize) ? entry->allocSize : entry->totalSize;
     }
 
+    SizeCache::Instance().PutNegative(normalized);
     return std::nullopt;
 }
 
@@ -129,17 +126,13 @@ static std::optional<uint64_t> LookupDirSize(const std::wstring& fullPath) {
 // ---------------------------------------------------------------------------
 
 static std::wstring GetDirForHandle(HANDLE h) {
-    wchar_t buf[MAX_PATH + 4];
+    // Big enough for long paths; MAX_PATH silently broke deep trees.
+    wchar_t buf[2048];
     DWORD len = GetFinalPathNameByHandleW(h, buf, _countof(buf),
                                            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (len == 0 || len >= _countof(buf))
         return {};
-
-    std::wstring result(buf);
-    if (result.size() > 4 && result.substr(0, 4) == L"\\\\?\\")
-        result = result.substr(4);
-
-    return result;
+    return std::wstring(buf, len);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,12 +163,13 @@ struct DirEntryHeader {
 
 static ULONG GetFileNameOffset(ULONG infoClass) {
     switch (infoClass) {
+    // Offsets are offsetof(FILE_xxx_INFORMATION, FileName):
     case kFileDirectoryInformation:       return 64;
-    case kFileFullDirectoryInformation:   return 68;
-    case kFileBothDirectoryInformation:   return 94;
-    case kFileIdBothDirectoryInformation: return 104;
-    case kFileIdFullDirectoryInformation: return 72;
-    case kFileIdExtdDirectoryInformation: return 120;
+    case kFileFullDirectoryInformation:   return 68;  // + EaSize
+    case kFileBothDirectoryInformation:   return 94;  // + ShortName[12]
+    case kFileIdBothDirectoryInformation: return 104; // + FileId (8, aligned)
+    case kFileIdFullDirectoryInformation: return 80;  // EaSize + pad + FileId(8) — was wrongly 72
+    case kFileIdExtdDirectoryInformation: return 88;  // EaSize + ReparseTag + FILE_ID_128 — was wrongly 120
     default: return 0;
     }
 }
@@ -203,6 +197,35 @@ static NTSTATUS NTAPI HookedNtQueryDirectoryFile(
     ULONG fnOffset = GetFileNameOffset(FileInformationClass);
     if (fnOffset == 0)
         return status;
+
+    // Cheap early-out: if the size database was never readable there is
+    // nothing to inject — don't pay for handle-path resolution and
+    // per-entry canonicalization on every directory enumeration.
+    if (!GetHookDb().IsOpen())
+        return status;
+
+    // Second early-out: only resolve the handle path if the listing
+    // actually contains at least one real subdirectory.
+    {
+        bool hasDir = false;
+        BYTE* scan = reinterpret_cast<BYTE*>(FileInformation);
+        for (;;) {
+            auto* hdr = reinterpret_cast<DirEntryHeader*>(scan);
+            if ((hdr->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !(hdr->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                hdr->FileNameLength > 0) {
+                const wchar_t* fn = reinterpret_cast<const wchar_t*>(scan + fnOffset);
+                ULONG n = hdr->FileNameLength / sizeof(wchar_t);
+                bool isDot = (n == 1 && fn[0] == L'.') ||
+                             (n == 2 && fn[0] == L'.' && fn[1] == L'.');
+                if (!isDot) { hasDir = true; break; }
+            }
+            if (hdr->NextEntryOffset == 0) break;
+            scan += hdr->NextEntryOffset;
+        }
+        if (!hasDir)
+            return status;
+    }
 
     std::wstring dirPath = GetDirForHandle(FileHandle);
     if (dirPath.empty())
@@ -360,7 +383,27 @@ static HRESULT STDMETHODCALLTYPE HookedPropDescFormatForDisplay(
 static std::once_flag g_hookOnce;
 static std::atomic<bool> g_hookInstalled{false};
 
+// The Detours hooks patch process-wide entry points (an ntdll syscall stub
+// and shared COM vtables) and rewrite directory-entry sizes for EVERY
+// caller in the process. That is intended solely for Explorer's folder
+// views — but this DLL also gets loaded into any application that shows a
+// common file dialog or activates our COM objects, and those applications
+// (backup tools, sync clients, installers) must see real filesystem data.
+static bool IsExplorerProcess() {
+    wchar_t path[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, path, _countof(path));
+    if (len == 0 || len >= _countof(path)) return false;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return _wcsicmp(name, L"explorer.exe") == 0;
+}
+
 void InstallShellHook() {
+    // Never hook a foreign host process (see IsExplorerProcess). Checked
+    // outside the once-flag so an early call from a non-Explorer process
+    // doesn't permanently consume it.
+    if (!IsExplorerProcess()) return;
+
     std::call_once(g_hookOnce, [] {
         DebugLog("InstallShellHook: starting\n");
 
@@ -425,12 +468,25 @@ void InstallShellHook() {
         error = DetourTransactionCommit();
         if (error == NO_ERROR) {
             g_hookInstalled.store(true);
+            // Pin this DLL in the process. Once Detours has patched
+            // ntdll/vtable entries, unloading the DLL (e.g. after
+            // DllCanUnloadNow returned S_OK) would leave the patched
+            // functions jumping into freed memory and crash Explorer.
+            HMODULE self = nullptr;
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&InstallShellHook), &self);
             DebugLog("InstallShellHook: all hooks installed OK\n");
         } else {
             DebugLog("InstallShellHook: DetourTransactionCommit failed: %ld\n",
                      error);
         }
     });
+}
+
+bool ShellHookActive() {
+    return g_hookInstalled.load();
 }
 
 void RemoveShellHook() {

@@ -6,6 +6,7 @@
 #include "dirsize/ipc.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <thread>
 
@@ -24,6 +25,11 @@ public:
     // Set the scanner reference (for forwarding recalculate/reload commands).
     void SetScanner(Scanner* scanner) { m_scanner = scanner; }
 
+    // Optional hook invoked after a ReloadConfig command, so the host can
+    // apply config changes beyond the scanner (e.g. restart the directory
+    // watchers when the watched-directory list changed).
+    void SetReloadCallback(std::function<void()> cb) { m_onReload = std::move(cb); }
+
     void Start();
     void Stop();
 
@@ -33,6 +39,7 @@ private:
 
     std::shared_ptr<Database> m_db;
     Scanner* m_scanner = nullptr;
+    std::function<void()> m_onReload;
 
     std::thread m_listenerThread;
     std::atomic<bool> m_running{false};

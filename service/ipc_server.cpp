@@ -2,10 +2,92 @@
 #include "scanner.h"
 #include "log_buffer.h"
 
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
 namespace dirsize {
+
+namespace {
+
+// Maximum accepted request payload. Prevents a malicious client from
+// making the service allocate arbitrary amounts of memory.
+constexpr uint32_t kMaxRequestPayload = 64 * 1024;
+
+// Timeout for individual pipe reads/writes so a stalled or malicious
+// client can't hang the (single-threaded) listener forever.
+constexpr DWORD kIoTimeoutMs = 5000;
+
+// The pipe handle is created with FILE_FLAG_OVERLAPPED, so all IO must go
+// through OVERLAPPED calls. These helpers perform cancellable, time-limited
+// transfers; stopEvent aborts immediately on service shutdown.
+bool PipeTransfer(HANDLE hPipe, void* buf, DWORD len, bool write,
+                  HANDLE stopEvent) {
+    DWORD done = 0;
+    BYTE* p = static_cast<BYTE*>(buf);
+
+    OVERLAPPED ov = {};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    bool result = true;
+    while (done < len) {
+        ResetEvent(ov.hEvent);
+        DWORD chunk = 0;
+        BOOL ok = write
+            ? WriteFile(hPipe, p + done, len - done, &chunk, &ov)
+            : ReadFile(hPipe, p + done, len - done, &chunk, &ov);
+
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err != ERROR_IO_PENDING) { result = false; break; }
+
+            HANDLE waits[] = { stopEvent, ov.hEvent };
+            DWORD wr = WaitForMultipleObjects(
+                stopEvent ? 2 : 1, stopEvent ? waits : &ov.hEvent,
+                FALSE, kIoTimeoutMs);
+            if (wr != (stopEvent ? WAIT_OBJECT_0 + 1 : WAIT_OBJECT_0)) {
+                // Stop signaled, timeout, or wait failure
+                CancelIoEx(hPipe, &ov);
+                GetOverlappedResult(hPipe, &ov, &chunk, TRUE);
+                result = false;
+                break;
+            }
+            if (!GetOverlappedResult(hPipe, &ov, &chunk, FALSE)) {
+                result = false;
+                break;
+            }
+        }
+        if (chunk == 0) { result = false; break; }
+        done += chunk;
+    }
+
+    CloseHandle(ov.hEvent);
+    return result;
+}
+
+bool PipeRead(HANDLE hPipe, void* buf, DWORD len, HANDLE stopEvent) {
+    return PipeTransfer(hPipe, buf, len, false, stopEvent);
+}
+
+bool PipeWrite(HANDLE hPipe, const void* buf, DWORD len, HANDLE stopEvent) {
+    return PipeTransfer(hPipe, const_cast<void*>(buf), len, true, stopEvent);
+}
+
+// Bounded replacement for FlushFileBuffers before DisconnectNamedPipe.
+// FlushFileBuffers blocks with NO timeout until the client consumes every
+// buffered byte — a client that reads the header but never drains the
+// payload could wedge the single-threaded listener forever. Instead, wait
+// (time-limited, via the same overlapped helper) for the client to close
+// its end: our clients close right after reading the full response, which
+// completes the pending read with ERROR_BROKEN_PIPE almost immediately.
+// A stalled client is simply abandoned after the IO timeout.
+void WaitForClientToFinish(HANDLE hPipe, HANDLE stopEvent) {
+    BYTE unused;
+    PipeRead(hPipe, &unused, 1, stopEvent);
+}
+
+} // namespace
 
 IpcServer::IpcServer(std::shared_ptr<Database> db)
     : m_db(std::move(db))
@@ -37,27 +119,24 @@ void IpcServer::Stop() {
 }
 
 void IpcServer::ListenerThread() {
+    // The engine runs in the user's own session; the pipe name is
+    // session-scoped and the default security descriptor (creator/owner +
+    // SYSTEM) is exactly what we want — only this user's processes
+    // (Explorer shell extension, settings dialog) can connect. This
+    // replaces the old NULL DACL, which granted everyone full control.
+    std::wstring pipeName = GetPipeName();
+
     while (m_running.load()) {
-        // Create a new pipe instance with security that allows
-        // authenticated users to connect.
-        SECURITY_DESCRIPTOR sd;
-        InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-        SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE); // Allow all access
-
-        SECURITY_ATTRIBUTES sa;
-        sa.nLength = sizeof(sa);
-        sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle = FALSE;
-
         HANDLE hPipe = CreateNamedPipeW(
-            kPipeName,
+            pipeName.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            4096,   // Output buffer size
+            64 * 1024, // Output buffer size (GetLog responses fit without
+                       // the write blocking on the client's read pace)
             4096,   // Input buffer size
             0,      // Default timeout
-            &sa);
+            nullptr);
 
         if (hPipe == INVALID_HANDLE_VALUE) {
             Sleep(1000); // Retry after a delay
@@ -100,11 +179,16 @@ void IpcServer::ListenerThread() {
 }
 
 void IpcServer::HandleClient(HANDLE hPipe) {
-    // Read request header
+    // Read request header (cancellable + time-limited; the pipe is
+    // overlapped, so plain synchronous ReadFile is not valid here anyway)
     IpcRequestHeader reqHeader;
-    DWORD bytesRead = 0;
-    if (!ReadFile(hPipe, &reqHeader, sizeof(reqHeader), &bytesRead, nullptr) ||
-        bytesRead != sizeof(reqHeader)) {
+    if (!PipeRead(hPipe, &reqHeader, sizeof(reqHeader), m_stopEvent)) {
+        return;
+    }
+
+    // Reject absurd payload sizes — the length field comes from an
+    // untrusted client and previously drove an unbounded allocation.
+    if (reqHeader.pathLengthBytes > kMaxRequestPayload) {
         return;
     }
 
@@ -113,8 +197,8 @@ void IpcServer::HandleClient(HANDLE hPipe) {
     std::wstring path;
     if (reqHeader.pathLengthBytes > 0) {
         rawPayload.resize(reqHeader.pathLengthBytes);
-        if (!ReadFile(hPipe, rawPayload.data(), reqHeader.pathLengthBytes, &bytesRead, nullptr) ||
-            bytesRead != reqHeader.pathLengthBytes) {
+        if (!PipeRead(hPipe, rawPayload.data(), reqHeader.pathLengthBytes,
+                      m_stopEvent)) {
             return;
         }
         // For most commands, the payload is a null-terminated wchar_t path
@@ -151,6 +235,11 @@ void IpcServer::HandleClient(HANDLE hPipe) {
     case IpcCommand::ReloadConfig:
         if (m_scanner) {
             m_scanner->ReloadConfig();
+        }
+        // Let the host react too (e.g. restart directory watchers when
+        // the watched-directory list changed).
+        if (m_onReload) {
+            m_onReload();
         }
         break;
 
@@ -231,11 +320,10 @@ void IpcServer::HandleClient(HANDLE hPipe) {
         }
 
         response.dataLengthBytes = static_cast<uint32_t>(payloadSize);
-        DWORD bytesWritten = 0;
-        WriteFile(hPipe, &response, sizeof(response), &bytesWritten, nullptr);
-        if (!payload.empty()) {
-            WriteFile(hPipe, payload.data(), response.dataLengthBytes,
-                      &bytesWritten, nullptr);
+        if (PipeWrite(hPipe, &response, sizeof(response), m_stopEvent) &&
+            !payload.empty()) {
+            PipeWrite(hPipe, payload.data(), response.dataLengthBytes,
+                      m_stopEvent);
         }
         responseSent = true;
         break;
@@ -250,9 +338,9 @@ void IpcServer::HandleClient(HANDLE hPipe) {
 
     // Send response (unless already sent by GetLog)
     if (!responseSent) {
-        DWORD bytesWritten = 0;
-        WriteFile(hPipe, &response, sizeof(response), &bytesWritten, nullptr);
+        PipeWrite(hPipe, &response, sizeof(response), m_stopEvent);
     }
+    WaitForClientToFinish(hPipe, m_stopEvent);
 }
 
 } // namespace dirsize
