@@ -769,6 +769,7 @@ void Scanner::FullScan() {
 }
 
 bool Scanner::ScanRoot(const std::wstring& canonicalRoot) {
+    ResetScanProgress();
     {
         std::lock_guard lock(m_stateMutex);
         m_currentScanPath = canonicalRoot;
@@ -1116,6 +1117,7 @@ void Scanner::PropagateAncestorDeltas(const std::wstring& path,
 }
 
 void Scanner::ManualScanOne(const std::wstring& path) {
+    ResetScanProgress();
     auto epochMs = [] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1315,7 +1317,10 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
             }
 
             result.fileCount++;
+            ++m_filesSeen;
         }
+
+        ReportScanProgress(childPath, outEntries);
 
     } while (FindNextFileW(hFind, &findData));
 
@@ -1360,7 +1365,8 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
 
     // Flush periodically so a full scan of a large volume doesn't buffer
     // millions of entries (hundreds of MB) in memory before writing.
-    constexpr size_t kFlushThreshold = 4096;
+    ++m_dirsCompleted;
+    constexpr size_t kFlushThreshold = 500;
     if (outEntries.size() >= kFlushThreshold) {
         FlushEntries(outEntries);
     }
@@ -1370,8 +1376,45 @@ ScanResult Scanner::ScanDirectory(const std::wstring& rootPath, int depth,
 
 void Scanner::FlushEntries(std::vector<DirEntry>& entries) {
     if (entries.empty()) return;
-    m_db->UpsertEntries(entries);
+    if (m_db->UpsertEntries(entries)) {
+        m_entriesPublished += entries.size();
+        // Make committed batches visible in open Explorer views while a
+        // larger root is still being enumerated.
+        std::vector<std::wstring> changedDirs;
+        changedDirs.reserve(entries.size());
+        for (const auto& entry : entries) changedDirs.push_back(entry.path);
+        PublishSizeChanges(changedDirs);
+    } else {
+        Log(LogSeverity::Error, "Failed to commit scan results to database");
+    }
     entries.clear();
+}
+
+void Scanner::ResetScanProgress() {
+    m_lastProgressTick = GetTickCount64();
+    m_filesSeen = 0;
+    m_dirsCompleted = 0;
+    m_entriesPublished = 0;
+}
+
+void Scanner::ReportScanProgress(const std::wstring& path,
+                                 std::vector<DirEntry>& entries) {
+    // Shallow rescans have their own completion log; report activity only
+    // while a full/manual scan is running.
+    if (!m_scanning.load()) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - m_lastProgressTick < 1000) return;
+    m_lastProgressTick = now;
+    // A smaller batch must not wait behind a large or slow subtree.
+    FlushEntries(entries);
+    {
+        std::lock_guard lock(m_stateMutex);
+        m_currentScanPath = path;
+    }
+    Log(LogSeverity::Info,
+        L"Scan progress: %llu files seen, %llu directories completed, "
+        L"%llu entries published; %s",
+        m_filesSeen, m_dirsCompleted, m_entriesPublished, path.c_str());
 }
 
 DWORD Scanner::GetClusterSize(const std::wstring& path) {

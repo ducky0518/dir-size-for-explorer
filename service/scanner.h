@@ -148,6 +148,10 @@ private:
     // Flush accumulated entries to the database and clear the vector.
     void FlushEntries(std::vector<DirEntry>& entries);
 
+    void ResetScanProgress();
+    void ReportScanProgress(const std::wstring& path,
+                            std::vector<DirEntry>& entries);
+
     std::shared_ptr<Database> m_db;
     Config m_config;
     std::mutex m_configMutex;
@@ -199,6 +203,11 @@ private:
     mutable std::mutex m_stateMutex;
     std::wstring m_currentScanPath;
     int64_t m_lastFullScanTime = 0;     // Unix epoch milliseconds
+    // Scheduler-thread-only activity counters, reset for each deep scan.
+    ULONGLONG m_lastProgressTick = 0;
+    uint64_t m_filesSeen = 0;
+    uint64_t m_dirsCompleted = 0;
+    uint64_t m_entriesPublished = 0;
 
     // Roots with confirmed real-time change coverage (canonical paths).
     std::mutex m_realtimeMutex;

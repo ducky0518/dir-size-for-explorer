@@ -40,6 +40,7 @@ set(DIRSIZE_WIN_LIBS
 )
 
 add_subdirectory(common)
+enable_testing()
 add_subdirectory(shell-ext)
 add_subdirectory(service)
 add_subdirectory(tray)
